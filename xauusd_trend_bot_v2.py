@@ -33,7 +33,7 @@ TG_TOKEN   = os.getenv('TG_TOKEN',         '8782238258:AAEtuQg7OYAmoemhWfLqKdYpq
 TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
 
 GOLD_EPIC  = 'GOLD'      # جرّب GOLD أو XAUUSD
-DEMO_MODE  = True        # ← False للـ Live
+DEMO_MODE  = False        # ← False للـ Live
 BASE_URL   = 'https://api-capital.backend-capital.com'
 
 # ================================================
