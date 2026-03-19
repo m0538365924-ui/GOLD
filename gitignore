@@ -1,0 +1,16 @@
+# بيانات حساسة — لا ترفعها أبداً
+.env
+*.db
+*.sqlite
+
+# ملفات Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# ملفات النظام
+.DS_Store
+Thumbs.db
