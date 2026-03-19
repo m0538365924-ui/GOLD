@@ -74,8 +74,8 @@ PULLBACK_MIN_ATR = 0.2   # low[-2] لازم ينزل 0.2 ATR تحت EMA21
 # إصلاح 6: Spread Filter
 MAX_SPREAD       = 1.5   # دولار — فوق هذا نتخطى
 
-TRADE_START_H  = 00
-TRADE_END_H    = 23:49
+TRADE_START_H  = 0
+TRADE_END_H    = 23
 SCAN_INTERVAL  = 300
 DB_FILE        = 'xauusd_v2.db'
 
