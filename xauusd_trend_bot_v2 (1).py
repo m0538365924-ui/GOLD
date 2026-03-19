@@ -17,7 +17,6 @@
 import os, requests, json, time, sqlite3
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 from datetime import datetime, timezone
 from threading import Lock
 from dotenv import load_dotenv
@@ -347,25 +346,52 @@ def fetch_candles(tf, count=250):
 def ema(s, p): return s.ewm(span=p, adjust=False).mean()
 
 def get_atr(df, p=14):
-    a = ta.atr(df['high'], df['low'], df['close'], length=p)
-    if a is None:
-        tr = pd.concat([df['high']-df['low'],
-                        (df['high']-df['close'].shift()).abs(),
-                        (df['low'] -df['close'].shift()).abs()], axis=1).max(axis=1)
-        a = tr.ewm(span=p, adjust=False).mean()
-    return float(a.iloc[-1])
+    """ATR يدوي — بدون pandas_ta"""
+    tr = pd.concat([
+        df['high'] - df['low'],
+        (df['high'] - df['close'].shift()).abs(),
+        (df['low']  - df['close'].shift()).abs()
+    ], axis=1).max(axis=1)
+    return float(tr.ewm(span=p, adjust=False).mean().iloc[-1])
 
 def get_adx(df, p=14):
+    """ADX يدوي — بدون pandas_ta"""
     try:
-        d = ta.adx(df['high'], df['low'], df['close'], length=p)
-        if d is None: return 0.0
-        col = [c for c in d.columns if c.startswith('ADX_')]
-        return round(float(d[col[0]].iloc[-1]), 1) if col else 0.0
-    except: return 0.0
+        high  = df['high']
+        low   = df['low']
+        close = df['close']
+
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low  - close.shift()).abs()
+        ], axis=1).max(axis=1)
+        atr = tr.ewm(span=p, adjust=False).mean()
+
+        plus_dm  = high.diff().clip(lower=0)
+        minus_dm = (-low.diff()).clip(lower=0)
+        plus_dm[plus_dm  < minus_dm] = 0
+        minus_dm[minus_dm < plus_dm] = 0
+
+        plus_di  = 100 * plus_dm.ewm(span=p, adjust=False).mean() / (atr + 1e-10)
+        minus_di = 100 * minus_dm.ewm(span=p, adjust=False).mean() / (atr + 1e-10)
+        dx       = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
+        adx      = dx.ewm(span=p, adjust=False).mean()
+        return round(float(adx.iloc[-1]), 1)
+    except:
+        return 0.0
 
 def get_rsi(s, p=14):
-    r = ta.rsi(s, length=p)
-    return round(float(r.iloc[-1]), 1) if r is not None else 50.0
+    """RSI يدوي — بدون pandas_ta"""
+    try:
+        delta = s.diff()
+        gain  = delta.clip(lower=0).ewm(com=p-1, adjust=False).mean()
+        loss  = (-delta.clip(upper=0)).ewm(com=p-1, adjust=False).mean()
+        rs    = gain / (loss + 1e-10)
+        rsi   = 100 - (100 / (1 + rs))
+        return round(float(rsi.iloc[-1]), 1)
+    except:
+        return 50.0
 
 def is_momentum_bull(df):
     """شمعة زخم صعودية على H1: body ≥ 40% من النطاق"""
