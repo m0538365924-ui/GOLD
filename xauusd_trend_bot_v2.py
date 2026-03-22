@@ -65,7 +65,7 @@ PAIRS = {
 # ── الإعدادات من الصورة ──
 STRATEGY_TF    = os.getenv('STRATEGY_TF',    'MINUTE_15')  # M15
 CANDLES_COUNT  = 500                                         # من الصورة
-SCAN_INTERVAL  = int(os.getenv('SCAN_INTERVAL', '1800'))
+SCAN_INTERVAL  = int(os.getenv('SCAN_INTERVAL', '300'))
 
 # ── Strategy Parameters من الصورة ──
 LENGTH         = int(os.getenv('LENGTH',   '10'))
