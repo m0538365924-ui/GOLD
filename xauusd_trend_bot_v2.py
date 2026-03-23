@@ -33,7 +33,7 @@ PAIRS = {
         'epic':          'GOLD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 1,
+        'size_override': None,
     },
     'BTCUSD': {
         'epic':          'BTCUSD',
