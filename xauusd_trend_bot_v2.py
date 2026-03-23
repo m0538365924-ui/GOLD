@@ -57,14 +57,14 @@ PAIRS = {
 
 STRATEGY_TF   = os.getenv('STRATEGY_TF', 'MINUTE_15')
 CANDLES_COUNT = 500
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '30000'))
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '180'))
 
 LENGTH       = int(os.getenv('LENGTH',      '10'))
 SLOPE_MULT   = float(os.getenv('SLOPE_MULT', '1.0'))
 SLOPE_METHOD = os.getenv('SLOPE_METHOD',    'ATR')
 ATR_PERIOD   = 14
-SL_ATR_MULT  = 1.5
-TP_ATR_MULT  = 3.0
+SL_ATR_MULT  = 1.7
+TP_ATR_MULT  = 1.0
 
 # ── ✅ إعدادات Break-even + Partial TP الجديدة ──
 BE_TRIGGER_R      = 1.0    # انقل SL للدخول عند تحقيق 1R ربح
