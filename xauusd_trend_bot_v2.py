@@ -88,8 +88,8 @@ SESSION_START = 00
 SESSION_END   = 23
 
 RISK_PERCENT         = float(os.getenv('RISK_PERCENT',    '0.01'))
-MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES',   '6'))
-MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS',   '5'))
+MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES',   '3'))
+MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS',   '3'))
 ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '50'))
 
 _BASE_DIR  = os.getenv('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
