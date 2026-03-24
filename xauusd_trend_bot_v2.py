@@ -228,7 +228,7 @@ def csv_log_trade(pair, direction, entry, sl, tp, exit_price,
         icon = '✅' if result == 'WIN' else ('❌' if result == 'LOSS' else '🔵')
         log(f'  {icon} CLOSED {pair} {direction} | PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R)')
 
-        nl = '
+        
 '
         tg(
             f'{icon} *{pair} {direction} CLOSED — {result}*{nl}'
