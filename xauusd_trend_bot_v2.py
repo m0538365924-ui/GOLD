@@ -40,7 +40,7 @@ PAIRS = {
         'epic':          'GOLD',       # XAUUSD على Capital.com
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 1,            # الذهب: حجم 1 لوت
+        'size_override': 0.05,            # الذهب: حجم 1 لوت
     },
     'BTCUSD': {
         'epic':          'BTCUSD',
