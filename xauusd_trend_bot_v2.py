@@ -88,8 +88,8 @@ EMA_SLOPE_PERIOD  = 20
 VOLUME_MA_PERIOD  = 20
 
 # ── فلتر الجلسة (UTC) ──
-SESSION_START = 3   # 06:00 بتوقيتك
-SESSION_END   = 20  # 23:00 بتوقيتك
+SESSION_START = 00   # 06:00 بتوقيتك
+SESSION_END   = 23  # 23:00 بتوقيتك
 
 # ── Risk ──
 RISK_PERCENT         = float(os.getenv('RISK_PERCENT',     '0.01'))
