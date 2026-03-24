@@ -37,28 +37,44 @@ DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 # ── الأزواج — من الصورة ──
 PAIRS = {
     'GOLD': {
-        'epic':          'GOLD',       # XAUUSD على Capital.com
+        'epic':          'GOLD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 0.05,            # الذهب: حجم 1 لوت
+        'size_override': 0.05,
     },
     'BTCUSD': {
         'epic':          'BTCUSD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': None,         # تلقائي
+        'size_override': None,
     },
     'EURUSD': {
         'epic':          'EURUSD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 1000,         # من الصورة
+        'size_override': 1000,
     },
     'GBPUSD': {
         'epic':          'GBPUSD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 1000,         # من الصورة
+        'size_override': 1000,
+    },
+
+    # ══════════════════════════════════════
+    # ✅ مؤشرات أمريكية جديدة
+    # ══════════════════════════════════════
+    'US100': {
+        'epic':          'US100',       # NASDAQ 100
+        'allow_buy':     True,
+        'allow_sell':    True,
+        'size_override': None,          # auto-calculated بناءً على RISK_PERCENT
+    },
+    'US500': {
+        'epic':          'US500',       # S&P 500
+        'allow_buy':     True,
+        'allow_sell':    True,
+        'size_override': None,          # auto-calculated بناءً على RISK_PERCENT
     },
 }
 
