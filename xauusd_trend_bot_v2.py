@@ -40,7 +40,7 @@ PAIRS = {
         'epic':          'GOLD',       # XAUUSD على Capital.com
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 1,            # الذهب: حجم 1 لوت
+        'size_override': 0.05,            # الذهب: حجم 1 لوت
     },
     'BTCUSD': {
         'epic':          'BTCUSD',
@@ -73,7 +73,7 @@ SLOPE_MULT     = float(os.getenv('SLOPE_MULT', '1.0'))
 SLOPE_METHOD   = os.getenv('SLOPE_METHOD', 'ATR')
 ATR_PERIOD     = 14
 SL_ATR_MULT    = 1.5    # من الصورة
-TP_ATR_MULT    = 3.0    # من الصورة
+TP_ATR_MULT    = 2.0    # من الصورة
 
 # ── Filter Parameters من الصورة ──
 SUPERTREND_PERIOD = 10   # من الصورة
