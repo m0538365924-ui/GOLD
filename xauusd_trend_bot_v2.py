@@ -229,7 +229,7 @@ def csv_log_trade(pair, direction, entry, sl, tp, exit_price,
         log(f'  {icon} CLOSED {pair} {direction} | PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R)')
 
         
-'
+
         tg(
             f'{icon} *{pair} {direction} CLOSED — {result}*{nl}'
             f'Entry: `{entry}` → Exit: `{exit_price}`{nl}'
