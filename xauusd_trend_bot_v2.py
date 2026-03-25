@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
 # multi_pairs_bot.py — TL Breaks + Multi-Filter Bot
-# XAUUSD + BTCUSD + EURUSD + GBPUSD | Capital.com API
+# XAUUSD + BTCUSD + EURUSD + GBPUSD + US100 + US500
+# Capital.com API
 # + Break-even بعد 1R + Partial TP عند 1.5R
+# ✅ إصلاح 9 أخطاء (v2.0)
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
@@ -53,21 +55,17 @@ PAIRS = {
         'allow_sell':    True,
         'size_override': 1000,
     },
-
-    # ══════════════════════════════════════
-    # ✅ مؤشرات أمريكية جديدة
-    # ══════════════════════════════════════
     'US100': {
-        'epic':          'US100',       # NASDAQ 100
+        'epic':          'US100',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': None,          # auto-calculated بناءً على RISK_PERCENT
+        'size_override': None,
     },
     'US500': {
-        'epic':          'US500',       # S&P 500
+        'epic':          'US500',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': None,          # auto-calculated بناءً على RISK_PERCENT
+        'size_override': None,
     },
 }
 
@@ -82,12 +80,12 @@ ATR_PERIOD   = 14
 SL_ATR_MULT  = 1.5
 TP_ATR_MULT  = 3.0
 
-# ── ✅ إعدادات Break-even + Partial TP الجديدة ──
-BE_TRIGGER_R      = 1.0    # انقل SL للدخول عند تحقيق 1R ربح
-PARTIAL_TP_R      = 1.5    # أغلق نصف الصفقة عند 1.5R
-PARTIAL_TP_RATIO  = 0.5    # نسبة الإغلاق الجزئي (50%)
-ENABLE_BE         = True   # تفعيل Break-even
-ENABLE_PARTIAL_TP = True   # تفعيل Partial TP
+# ── Break-even + Partial TP ──
+BE_TRIGGER_R      = 1.0
+PARTIAL_TP_R      = 1.5
+PARTIAL_TP_RATIO  = 0.5
+ENABLE_BE         = True
+ENABLE_PARTIAL_TP = True
 
 SUPERTREND_PERIOD = 10
 SUPERTREND_MULT   = 3.0
@@ -100,7 +98,16 @@ EMA_TREND3_SLOW   = 200
 EMA_SLOPE_PERIOD  = 20
 VOLUME_MA_PERIOD  = 20
 
-SESSION_START = 00
+# ✅ إصلاح #4: نطاق RSI أضيق (بدل >50 / <50)
+RSI_BUY_MIN  = 55
+RSI_BUY_MAX  = 78
+RSI_SELL_MIN = 22
+RSI_SELL_MAX = 45
+
+# ✅ إصلاح #6: حد الـ Spread
+SPREAD_ATR_MAX = 0.25   # spread > 25% من ATR → تخطّي
+
+SESSION_START = 0
 SESSION_END   = 23
 
 RISK_PERCENT         = float(os.getenv('RISK_PERCENT',    '0.01'))
@@ -153,7 +160,6 @@ def db_init():
             partial_done INTEGER DEFAULT 0,
             status       TEXT DEFAULT 'PENDING'
         )''')
-        # ── جدول الصفقات المفتوحة لمتابعة BE/Partial ──
         conn.execute('''CREATE TABLE IF NOT EXISTS open_positions (
             deal_id      TEXT PRIMARY KEY,
             pair         TEXT,
@@ -292,7 +298,7 @@ def csv_log_trade(pos, exit_price, be_triggered=False, partial_done=False):
             'sl_dist':      round(sl_dist, 5),
             'pnl_usd':      pnl_usd, 'pnl_r': pnl_r,
             'result':       result, 'bars_held': 0,
-            'spread':       0, 'tf': STRATEGY_TF,
+            'spread':       pos.get('spread', 0), 'tf': STRATEGY_TF,
             'be_triggered': int(be_triggered),
             'partial_done': int(partial_done),
             'supertrend':   0, 'rsi': 0,
@@ -419,13 +425,28 @@ def get_instrument_meta(epic):
     return result
 
 def get_current_price(epic):
-    """جلب السعر الحالي للزوج"""
     meta = get_instrument_meta(epic)
     bid, ask = meta[0], meta[1]
     return (bid + ask) / 2 if bid > 0 else 0.0
 
+# ✅ إصلاح #2: جلب سعر الإغلاق الحقيقي من سجل النشاط
+def get_closed_deal_price(deal_id, fallback_price):
+    try:
+        r = _get('/api/v1/history/activity', params={'dealId': deal_id, 'pageSize': 10})
+        if r and r.status_code == 200:
+            for act in r.json().get('activities', []):
+                details = act.get('details', {})
+                actions = details.get('actions', [])
+                for action in actions:
+                    if action.get('actionType') in ('POSITION_CLOSED', 'STOP_LIMIT_AMENDED'):
+                        lvl = action.get('level') or action.get('stopLevel')
+                        if lvl:
+                            return float(lvl)
+    except Exception as ex:
+        log(f'  get_closed_deal_price ERROR: {ex}')
+    return fallback_price
+
 def update_sl_api(deal_id, new_sl, tp):
-    """تعديل SL عبر API"""
     r = _put(f'/api/v1/positions/{deal_id}',
              {'stopLevel': new_sl, 'profitLevel': tp})
     if r and r.status_code == 200:
@@ -435,9 +456,7 @@ def update_sl_api(deal_id, new_sl, tp):
     return False
 
 def close_partial_api(deal_id, size):
-    """إغلاق جزئي عبر API"""
-    r = _post(f'/api/v1/positions/{deal_id}',
-              {'size': size})
+    r = _post(f'/api/v1/positions/{deal_id}', {'size': size})
     if r and r.status_code == 200:
         log(f'  💰 Partial close: {size} units (deal={deal_id})')
         return True
@@ -464,6 +483,8 @@ def tg_signal(sig, filters_info):
     icon = '🟢' if sig['direction'] == 'BUY' else '🔴'
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
     rr   = round(TP_ATR_MULT / SL_ATR_MULT, 1)
+    rsi  = filters_info['rsi']
+    rsi_zone = '🔥' if rsi > 70 else ('❄️' if rsi < 30 else '✅')
     nl   = '\n'
     tg(
         f'{icon} *{sig["pair"]} {sig["direction"]}* [{mode}]{nl}'
@@ -472,7 +493,7 @@ def tg_signal(sig, filters_info):
         f'ATR: `{sig["atr"]}` | Spread: `{sig["spread"]}`{nl}'
         f'BE عند `1R` | Partial TP عند `1.5R`{nl}'
         f'ST: `{"↑UP" if filters_info["st_dir"]==1 else "↓DN"}`'
-        f' | RSI: `{filters_info["rsi"]:.1f}`{nl}'
+        f' | RSI: `{rsi:.1f}` {rsi_zone}{nl}'
         f'EMA: `{"✅" if filters_info["ema_cross"] else "❌"}`'
         f' | Trend×3: `{"✅" if filters_info["ema3"] else "❌"}`{nl}'
         f'TF: `{STRATEGY_TF}`{nl}'
@@ -565,20 +586,25 @@ def calc_rsi(series, period=14):
     rs    = gain / loss.replace(0, 1e-10)
     return 100 - (100 / (1 + rs))
 
+# ✅ إصلاح #5: Volume Spike 1.5x بدل المتوسط فقط
 def calc_volume_filter(volume_series, period=20):
-    return volume_series > volume_series.rolling(period).mean()
+    ma = volume_series.rolling(period).mean()
+    return volume_series > (ma * 1.5)
 
+# ✅ إصلاح #8: >= بدل == لاكتشاف double tops/bottoms
 def find_pivot_high(high_series, length):
     n, pivots = len(high_series), [np.nan] * len(high_series)
     for i in range(length, n - length):
-        if high_series.iloc[i] == high_series.iloc[i-length: i+length+1].max():
+        window_max = high_series.iloc[i - length: i + length + 1].max()
+        if high_series.iloc[i] >= window_max:
             pivots[i] = high_series.iloc[i]
     return pivots
 
 def find_pivot_low(low_series, length):
     n, pivots = len(low_series), [np.nan] * len(low_series)
     for i in range(length, n - length):
-        if low_series.iloc[i] == low_series.iloc[i-length: i+length+1].min():
+        window_min = low_series.iloc[i - length: i + length + 1].min()
+        if low_series.iloc[i] <= window_min:
             pivots[i] = low_series.iloc[i]
     return pivots
 
@@ -600,14 +626,9 @@ def tl_value(anchor_idx, anchor_val, slope, goes_up, cur_idx):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ MANAGE OPEN POSITIONS — Break-even + Partial TP
+# MANAGE OPEN POSITIONS — Break-even + Partial TP
 # ═══════════════════════════════════════════════════════
 def manage_open_positions():
-    """
-    يُشغَّل في كل scan لمتابعة الصفقات المفتوحة:
-    1. Break-even: انقل SL للدخول فور تحقيق BE_TRIGGER_R
-    2. Partial TP: أغلق PARTIAL_TP_RATIO% عند PARTIAL_TP_R
-    """
     if not ENABLE_BE and not ENABLE_PARTIAL_TP:
         return
 
@@ -621,22 +642,24 @@ def manage_open_positions():
     for pos in tracked:
         deal_id = pos['deal_id']
 
-        # ── الصفقة أُغلقت بالسوق (SL/TP ضُرب) ──
+        # ✅ إصلاح #2 + #7: جلب سعر الإغلاق الحقيقي + حذف بعد التسجيل فقط
         if deal_id not in live_ids:
             log(f'  📋 {pos["pair"]} {deal_id} أُغلقت — نسجّلها')
-            # جلب سعر الإغلاق من API إن أمكن
-            exit_price = get_current_price(pos['pair'])
+            fallback   = get_current_price(pos['pair'])
+            exit_price = get_closed_deal_price(deal_id, fallback)
             if exit_price > 0:
                 result, pnl = csv_log_trade(
                     pos, exit_price,
                     be_triggered=bool(pos['be_triggered']),
                     partial_done=bool(pos['partial_done'])
                 )
-                db_update(pos['db_key'], result.upper() if result in ('WIN','LOSS','BE') else 'CLOSED')
-            op_delete(deal_id)
+                if result != 'ERROR':
+                    db_update(pos['db_key'], result.upper() if result in ('WIN','LOSS','BE') else 'CLOSED')
+                    op_delete(deal_id)   # ✅ احذف فقط بعد نجاح التسجيل
+                else:
+                    log(f'  ⚠️ csv_log_trade فشل — سنحاول في scan قادم')
             continue
 
-        # ── احسب الربح الحالي بالـ R ──
         cur_price = get_current_price(pos['pair'])
         if cur_price <= 0:
             continue
@@ -644,7 +667,6 @@ def manage_open_positions():
         entry   = pos['entry']
         sl      = pos['sl']
         tp      = pos['tp']
-        atr     = pos['atr']
         size    = pos['size']
         dir_    = pos['direction']
         sl_dist = abs(entry - sl)
@@ -656,7 +678,7 @@ def manage_open_positions():
 
         log(f'  📊 {pos["pair"]} {dir_} | R={profit_r:.2f} | BE={pos["be_triggered"]} | Partial={pos["partial_done"]}')
 
-        # ── [1] Partial TP عند PARTIAL_TP_R ──
+        # [1] Partial TP عند PARTIAL_TP_R
         if ENABLE_PARTIAL_TP and not pos['partial_done'] and profit_r >= PARTIAL_TP_R:
             _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
             partial_size = round(size * PARTIAL_TP_RATIO, 2)
@@ -664,24 +686,26 @@ def manage_open_positions():
                 ok = close_partial_api(deal_id, partial_size)
                 if ok:
                     op_update(deal_id, partial_done=True)
+                    nl = '\n'
                     tg(
-                        f'💰 *Partial TP — {pos["pair"]} {dir_}*\n'
-                        f'أغلقنا `{partial_size}` وحدة عند `{round(cur_price,5)}`\n'
-                        f'R: `+{profit_r:.2f}R` | الباقي يجري مع BE\n'
+                        f'💰 *Partial TP — {pos["pair"]} {dir_}*{nl}'
+                        f'أغلقنا `{partial_size}` وحدة عند `{round(cur_price,5)}`{nl}'
+                        f'R: `+{profit_r:.2f}R` | الباقي يجري مع BE{nl}'
                         f'_{utc_now()}_'
                     )
 
-        # ── [2] Break-even عند BE_TRIGGER_R ──
+        # [2] Break-even عند BE_TRIGGER_R
         if ENABLE_BE and not pos['be_triggered'] and profit_r >= BE_TRIGGER_R:
             new_sl = round(entry + 0.00001, 5) if dir_ == 'BUY' \
                      else round(entry - 0.00001, 5)
             ok = update_sl_api(deal_id, new_sl, tp)
             if ok:
                 op_update(deal_id, be_triggered=True, sl=new_sl)
+                nl = '\n'
                 tg(
-                    f'🔒 *Break-even — {pos["pair"]} {dir_}*\n'
-                    f'SL نُقل للدخول: `{new_sl}`\n'
-                    f'السعر الحالي: `{round(cur_price,5)}` | R: `+{profit_r:.2f}R`\n'
+                    f'🔒 *Break-even — {pos["pair"]} {dir_}*{nl}'
+                    f'SL نُقل للدخول: `{new_sl}`{nl}'
+                    f'السعر الحالي: `{round(cur_price,5)}` | R: `+{profit_r:.2f}R`{nl}'
                     f'_{utc_now()}_'
                 )
 
@@ -704,18 +728,18 @@ def check_signal(pair_name, config):
     df_c = df.iloc[:-1].copy().reset_index(drop=True)
     n    = len(df_c)
 
-    atr_s      = calc_atr_series(df_c, ATR_PERIOD)
-    ph_arr     = find_pivot_high(df_c['high'], LENGTH)
-    pl_arr     = find_pivot_low(df_c['low'],   LENGTH)
+    atr_s           = calc_atr_series(df_c, ATR_PERIOD)
+    ph_arr          = find_pivot_high(df_c['high'], LENGTH)
+    pl_arr          = find_pivot_low(df_c['low'],   LENGTH)
     st_line, st_dir = calc_supertrend(df_c, SUPERTREND_PERIOD, SUPERTREND_MULT)
-    ema_fast   = calc_ema(df_c['close'], EMA_FAST)
-    ema_slow   = calc_ema(df_c['close'], EMA_SLOW)
-    ema_t3_f   = calc_ema(df_c['close'], EMA_TREND3_FAST)
-    ema_t3_m   = calc_ema(df_c['close'], EMA_TREND3_MID)
-    ema_t3_s   = calc_ema(df_c['close'], EMA_TREND3_SLOW)
-    ema_slope  = calc_ema_slope(df_c['close'], EMA_SLOPE_PERIOD)
-    rsi_s      = calc_rsi(df_c['close'], RSI_PERIOD)
-    vol_filter = calc_volume_filter(df_c['volume'], VOLUME_MA_PERIOD)
+    ema_fast        = calc_ema(df_c['close'], EMA_FAST)
+    ema_slow        = calc_ema(df_c['close'], EMA_SLOW)
+    ema_t3_f        = calc_ema(df_c['close'], EMA_TREND3_FAST)
+    ema_t3_m        = calc_ema(df_c['close'], EMA_TREND3_MID)
+    ema_t3_s        = calc_ema(df_c['close'], EMA_TREND3_SLOW)
+    ema_slope       = calc_ema_slope(df_c['close'], EMA_SLOPE_PERIOD)
+    rsi_s           = calc_rsi(df_c['close'], RSI_PERIOD)
+    vol_filter      = calc_volume_filter(df_c['volume'], VOLUME_MA_PERIOD)
 
     upper_tl = lower_tl = None
     for i in range(LENGTH + ATR_PERIOD, n):
@@ -747,46 +771,58 @@ def check_signal(pair_name, config):
 
     signal = None
 
+    # ── BUY ──
     if allow_buy and upper_tl is not None:
         ai, av, sv = upper_tl
         if ai < last_idx - 1:
-            u_val = tl_value(ai, av, sv, False, last_idx)
-            if last_close > u_val:
+            u_val      = tl_value(ai, av, sv, False, last_idx)
+            # ✅ إصلاح #1: شمعتان مغلقتان فوق TL
+            prev_close = float(df_c['close'].iloc[last_idx - 1])
+            prev_u_val = tl_value(ai, av, sv, False, last_idx - 1)
+            tl_broken  = last_close > u_val and prev_close > prev_u_val
+
+            if tl_broken:
                 filters = [
                     cur_st_dir == 1,
                     cur_ema_f > cur_ema_s,
                     cur_ema3_f > cur_ema3_m > cur_ema3_s,
                     cur_slope > 0,
-                    cur_rsi > 50,
+                    RSI_BUY_MIN < cur_rsi < RSI_BUY_MAX,   # ✅ إصلاح #4
                     cur_vol,
                 ]
                 if all(filters):
                     signal = 'BUY'
-                    log(f'  {pair_name}: 🟢 BUY | 6/6 ✅')
+                    log(f'  {pair_name}: 🟢 BUY | 6/6 ✅ | RSI={cur_rsi:.1f}')
                 else:
-                    failed = [['ST','EMA','Trend×3','Slope',f'RSI({cur_rsi:.0f})','Vol'][i]
-                              for i, f in enumerate(filters) if not f]
+                    names  = ['ST','EMA','Trend×3','Slope',f'RSI({cur_rsi:.0f})','Vol']
+                    failed = [names[i] for i, f in enumerate(filters) if not f]
                     log(f'  {pair_name}: BUY TL ✅ فلاتر فشلت: {", ".join(failed)}')
 
+    # ── SELL ──
     if allow_sell and signal is None and lower_tl is not None:
         ai, av, sv = lower_tl
         if ai < last_idx - 1:
-            l_val = tl_value(ai, av, sv, True, last_idx)
-            if last_close < l_val:
+            l_val      = tl_value(ai, av, sv, True, last_idx)
+            # ✅ إصلاح #1: شمعتان مغلقتان تحت TL
+            prev_close = float(df_c['close'].iloc[last_idx - 1])
+            prev_l_val = tl_value(ai, av, sv, True, last_idx - 1)
+            tl_broken  = last_close < l_val and prev_close < prev_l_val
+
+            if tl_broken:
                 filters = [
                     cur_st_dir == -1,
                     cur_ema_f < cur_ema_s,
                     cur_ema3_f < cur_ema3_m < cur_ema3_s,
                     cur_slope < 0,
-                    cur_rsi < 50,
+                    RSI_SELL_MIN < cur_rsi < RSI_SELL_MAX,   # ✅ إصلاح #4
                     cur_vol,
                 ]
                 if all(filters):
                     signal = 'SELL'
-                    log(f'  {pair_name}: 🔴 SELL | 6/6 ✅')
+                    log(f'  {pair_name}: 🔴 SELL | 6/6 ✅ | RSI={cur_rsi:.1f}')
                 else:
-                    failed = [['ST','EMA','Trend×3','Slope',f'RSI({cur_rsi:.0f})','Vol'][i]
-                              for i, f in enumerate(filters) if not f]
+                    names  = ['ST','EMA','Trend×3','Slope',f'RSI({cur_rsi:.0f})','Vol']
+                    failed = [names[i] for i, f in enumerate(filters) if not f]
                     log(f'  {pair_name}: SELL TL ✅ فلاتر فشلت: {", ".join(failed)}')
 
     if not signal:
@@ -796,11 +832,20 @@ def check_signal(pair_name, config):
     if bid <= 0 or ask <= 0:
         return None
 
+    # ✅ إصلاح #6: رفض الدخول إذا Spread عالٍ
+    if spread > last_atr * SPREAD_ATR_MAX:
+        log(f'  {pair_name}: ⚠️ Spread={spread:.5f} > {SPREAD_ATR_MAX*100:.0f}% ATR — تخطّي')
+        return None
+
     entry = ask if signal == 'BUY' else bid
-    sl    = round(entry - SL_ATR_MULT * last_atr, 5) if signal == 'BUY' \
-            else round(entry + SL_ATR_MULT * last_atr, 5)
-    tp    = round(entry + TP_ATR_MULT * last_atr, 5) if signal == 'BUY' \
-            else round(entry - TP_ATR_MULT * last_atr, 5)
+
+    # ✅ إصلاح #6: إضافة الـ spread لـ SL/TP
+    if signal == 'BUY':
+        sl = round(entry - SL_ATR_MULT * last_atr - spread, 5)
+        tp = round(entry + TP_ATR_MULT * last_atr, 5)
+    else:
+        sl = round(entry + SL_ATR_MULT * last_atr + spread, 5)
+        tp = round(entry - TP_ATR_MULT * last_atr, 5)
 
     sl_dist = abs(entry - sl)
     if sl_dist < last_atr * 0.1:
@@ -817,7 +862,7 @@ def check_signal(pair_name, config):
         'pair':      pair_name, 'epic': epic,
         'direction': signal,
         'entry':     round(entry, 5),
-        'sl': sl,   'tp': tp,
+        'sl': sl,    'tp': tp,
         'atr':       round(last_atr, 5),
         'size':      size,
         'spread':    round(spread, 5),
@@ -868,13 +913,13 @@ def execute_order(sig):
             reason   = confirm.get('reason', '')
             tg_result(sig['pair'], sig['direction'], status, deal_ref, reason)
 
-            # ── سجّل الصفقة لمتابعة BE/Partial ──
             if status in ('ACCEPTED', 'SUCCESS'):
+                # ✅ إصلاح #3: db_key يشمل الدقيقة لمنع التكرار
+                db_key = f'{sig["pair"]}_{datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")}'
                 op_save(
                     deal_id, sig['pair'], sig['direction'],
                     sig['entry'], sig['sl'], sig['tp'],
-                    sig['atr'], sig['size'],
-                    f'{sig["pair"]}_{datetime.now(timezone.utc).strftime("%Y-%m-%d_%H")}'
+                    sig['atr'], sig['size'], db_key
                 )
             return status, deal_ref
         return 'UNKNOWN', deal_ref
@@ -901,8 +946,6 @@ def run_scan():
     log('─' * 60)
 
     get_balance()
-
-    # ── ✅ تشغيل إدارة الصفقات المفتوحة أولاً ──
     manage_open_positions()
 
     open_pos = get_open_positions()
@@ -911,7 +954,8 @@ def run_scan():
         log('  ⏸  الحد الأقصى')
         return
 
-    ts_key = now.strftime('%Y-%m-%d_%H')
+    # ✅ إصلاح #3: ts_key يشمل الدقيقة
+    ts_key = now.strftime('%Y-%m-%d_%H%M')
 
     for pair_name, config in PAIRS.items():
         if len(open_pos) >= MAX_OPEN_TRADES:
@@ -950,11 +994,14 @@ def start_bot():
     nl   = '\n'
 
     print('=' * 60, flush=True)
-    print(f'  Multi-Pairs TL Breaks Bot [{mode}]',              flush=True)
+    print(f'  Multi-Pairs TL Breaks Bot [{mode}] v2.0',         flush=True)
     print(f'  TF: {STRATEGY_TF} | Candles: {CANDLES_COUNT}',   flush=True)
     print(f'  SL/TP: {SL_ATR_MULT}/{TP_ATR_MULT}×ATR',         flush=True)
     print(f'  ✅ Break-even عند {BE_TRIGGER_R}R',               flush=True)
     print(f'  ✅ Partial TP {int(PARTIAL_TP_RATIO*100)}% عند {PARTIAL_TP_R}R', flush=True)
+    print(f'  ✅ RSI BUY: {RSI_BUY_MIN}-{RSI_BUY_MAX} | SELL: {RSI_SELL_MIN}-{RSI_SELL_MAX}', flush=True)
+    print(f'  ✅ Volume Spike: 1.5x MA | Spread MAX: {SPREAD_ATR_MAX*100:.0f}% ATR', flush=True)
+    print(f'  ✅ Breakout Confirm: 2 شمعات مغلقة',              flush=True)
     print(f'  Filters: ST({SUPERTREND_PERIOD}) | EMA {EMA_FAST}/{EMA_SLOW}'
           f' | Trend×3 | Slope | RSI({RSI_PERIOD}) | Volume',   flush=True)
     for pn, pc in PAIRS.items():
@@ -964,11 +1011,13 @@ def start_bot():
     print('=' * 60, flush=True)
 
     tg(
-        f'🚀 *Multi-Pairs Bot* [{mode}]{nl}'
+        f'🚀 *Multi-Pairs Bot v2.0* [{mode}]{nl}'
         f'TF: `{STRATEGY_TF}` | SL/TP: `{SL_ATR_MULT}/{TP_ATR_MULT}×ATR`{nl}'
         f'🔒 Break-even: عند `{BE_TRIGGER_R}R`{nl}'
         f'💰 Partial TP: `{int(PARTIAL_TP_RATIO*100)}%` عند `{PARTIAL_TP_R}R`{nl}'
-        f'Filters: `ST | EMA | Trend×3 | Slope | RSI | Volume`{nl}'
+        f'📊 RSI BUY: `{RSI_BUY_MIN}-{RSI_BUY_MAX}` | SELL: `{RSI_SELL_MIN}-{RSI_SELL_MAX}`{nl}'
+        f'📈 Breakout: `2 شمعات تأكيد`{nl}'
+        f'🔊 Volume: `1.5x Spike`{nl}'
         f'Pairs: `{"` | `".join(PAIRS.keys())}`{nl}'
         f'_{utc_now()}_'
     )
@@ -982,7 +1031,8 @@ def start_bot():
                     continue
             else:
                 ping_session()
-            session_age = (session_age + 1) % 25
+            # ✅ إصلاح #9: تجديد Session كل 15 scan (7.5 دقيقة)
+            session_age = (session_age + 1) % 15
             run_scan()
         except KeyboardInterrupt:
             log('🛑 Bot stopped')
