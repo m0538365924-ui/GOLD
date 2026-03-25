@@ -45,14 +45,14 @@ PAIRS = {
     },
     'EURUSD': {
         'epic':          'EURUSD',
-        'allow_buy':     True,
-        'allow_sell':    True,
+        'allow_buy':     False,
+        'allow_sell':    False,
         'size_override': 1000,
     },
     'GBPUSD': {
         'epic':          'GBPUSD',
-        'allow_buy':     True,
-        'allow_sell':    True,
+        'allow_buy':     False,
+        'allow_sell':    False,
         'size_override': 1000,
     },
     'US100': {
