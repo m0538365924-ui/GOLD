@@ -626,73 +626,8 @@ def check_signal(pair_name, config):
     cur_vol     = bool(vol_filter.iloc[last_idx])
 
     # ── كشف إشارة TL Break ──
-    # ── كشف إشارة TL Break مع فلترة محسّنة ──
-signal = None
-
-# إعداد شرط حجم التداول
-avg_volume_threshold = 1.2  # على سبيل المثال، حجم التداول الحالي > 1.2 × متوسط الحجم
-f_volume = cur_vol > (avg_vol * avg_volume_threshold)
-
-# ── إشارة شراء BUY ──
-if allow_buy and upper_tl is not None:
-    ai, av, sv = upper_tl
-    if ai < last_idx - 1:
-        u_val = tl_value(ai, av, sv, False, last_idx)
-        if last_close > u_val:
-            # تطبيق الفلاتر السبعة على BUY
-            f_supertrend = (cur_st_dir == 1)            # ST صاعد
-            f_ema_cross  = (cur_ema_f > cur_ema_s)      # EMA Fast > Slow
-            f_ema_trend3 = (cur_ema3_f > cur_ema3_m > cur_ema3_s)  # Trend×3 صاعد
-            f_ema_slope  = (cur_slope > 0)              # Slope صاعد
-            f_rsi        = (cur_rsi < 30)               # RSI < 30 → تشبع بيع → فرصة شراء
-            all_pass = all([f_supertrend, f_ema_cross,
-                            f_ema_trend3, f_ema_slope,
-                            f_rsi, f_volume])
-
-            if all_pass:
-                signal = 'BUY'
-                log(f'  {pair_name}: 🟢 BUY | TL ksr + 6/6 filters ✅')
-            else:
-                failed = []
-                if not f_supertrend: failed.append('ST')
-                if not f_ema_cross:  failed.append('EMA')
-                if not f_ema_trend3: failed.append('Trend×3')
-                if not f_ema_slope:  failed.append('Slope')
-                if not f_rsi:        failed.append(f'RSI({cur_rsi:.0f})')
-                if not f_volume:     failed.append('Vol')
-                log(f'  {pair_name}: BUY TL ✅ لكن فلاتر فشلت: {", ".join(failed)}')
-
-# ── إشارة بيع SELL ──
-if allow_sell and signal is None and lower_tl is not None:
-    ai, av, sv = lower_tl
-    if ai < last_idx - 1:
-        l_val = tl_value(ai, av, sv, True, last_idx)
-        if last_close < l_val:
-            # تطبيق الفلاتر السبعة على SELL
-            f_supertrend = (cur_st_dir == -1)           # ST هابط
-            f_ema_cross  = (cur_ema_f < cur_ema_s)      # EMA Fast < Slow
-            f_ema_trend3 = (cur_ema3_f < cur_ema3_m < cur_ema3_s)  # Trend×3 هابط
-            f_ema_slope  = (cur_slope < 0)              # Slope هابط
-            f_rsi        = (cur_rsi > 70)               # RSI > 70 → تشبع شراء → فرصة بيع
-            all_pass = all([f_supertrend, f_ema_cross,
-                            f_ema_trend3, f_ema_slope,
-                            f_rsi, f_volume])
-
-            if all_pass:
-                signal = 'SELL'
-                log(f'  {pair_name}: 🔴 SELL | TL ksr + 6/6 filters ✅')
-            else:
-                failed = []
-                if not f_supertrend: failed.append('ST')
-                if not f_ema_cross:  failed.append('EMA')
-                if not f_ema_trend3: failed.append('Trend×3')
-                if not f_ema_slope:  failed.append('Slope')
-                if not f_rsi:        failed.append(f'RSI({cur_rsi:.0f})')
-                if not f_volume:     failed.append('Vol')
-                log(f'  {pair_name}: SELL TL ✅ لكن فلاتر فشلت: {", ".join(failed)}')
-
-if not signal:
-    return None
+     # ── كشف إشارة TL Break ── signal = None
+ `if allow_buy and upper_tl is not None:       ai, av, sv = upper_tl       if ai < last_idx - 1:           u_val = tl_value(ai, av, sv, False, last_idx)           if last_close > u_val:               # ── تطبيق الفلاتر السبعة على BUY ──               f_supertrend = (cur_st_dir == 1)           # [1] ST صاعد               f_ema_cross  = (cur_ema_f > cur_ema_s)     # [2] EMA Fast > Slow               f_ema_trend3 = (cur_ema3_f > cur_ema3_m    # [3] Trend×3                               > cur_ema3_s)               f_ema_slope  = (cur_slope > 0)             # [4] Slope صاعد               f_rsi        = (cur_rsi > 37)              # [5] RSI > 50               f_volume     = cur_vol                     # [6] Volume قوي                all_pass = all([f_supertrend, f_ema_cross,                               f_ema_trend3, f_ema_slope,                               f_rsi, f_volume])                if all_pass:                   signal = 'BUY'                   log(f'  {pair_name}: 🟢 BUY | TL ksr + 6/6 filters ✅')               else:                   failed = []                   if not f_supertrend: failed.append('ST')                   if not f_ema_cross:  failed.append('EMA')                   if not f_ema_trend3: failed.append('Trend×3')                   if not f_ema_slope:  failed.append('Slope')                   if not f_rsi:        failed.append(f'RSI({cur_rsi:.0f})')                   if not f_volume:     failed.append('Vol')                   log(f'  {pair_name}: BUY TL ✅ لكن فلاتر فشلت: {", ".join(failed)}')    if allow_sell and signal is None and lower_tl is not None:       ai, av, sv = lower_tl       if ai < last_idx - 1:           l_val = tl_value(ai, av, sv, True, last_idx)           if last_close < l_val:               # ── تطبيق الفلاتر السبعة على SELL ──               f_supertrend = (cur_st_dir == -1)          # [1] ST هابط               f_ema_cross  = (cur_ema_f < cur_ema_s)     # [2] EMA Fast < Slow               f_ema_trend3 = (cur_ema3_f < cur_ema3_m    # [3] Trend×3                               < cur_ema3_s)               f_ema_slope  = (cur_slope < 0)             # [4] Slope هابط               f_rsi        = (cur_rsi < 65)              # [5] RSI < 50               f_volume     = cur_vol                     # [6] Volume قوي                all_pass = all([f_supertrend, f_ema_cross,                               f_ema_trend3, f_ema_slope,                               f_rsi, f_volume])                if all_pass:                   signal = 'SELL'                   log(f'  {pair_name}: 🔴 SELL | TL ksr + 6/6 filters ✅')               else:                   failed = []                   if not f_supertrend: failed.append('ST')                   if not f_ema_cross:  failed.append('EMA')                   if not f_ema_trend3: failed.append('Trend×3')                   if not f_ema_slope:  failed.append('Slope')                   if not f_rsi:        failed.append(f'RSI({cur_rsi:.0f})')                   if not f_volume:     failed.append('Vol')                   log(f'  {pair_name}: SELL TL ✅ لكن فلاتر فشلت: {", ".join(failed)}')    if not signal:       return None `
 
     # ── حجم الصفقة ──
     if config.get('size_override') is not None:
