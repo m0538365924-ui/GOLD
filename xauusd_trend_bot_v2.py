@@ -40,7 +40,7 @@ PAIRS = {
         'epic':          'GOLD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 0.05,
+        'size_override': None,
     },
     'BTCUSD': {
         'epic':          'BTCUSD',
@@ -52,13 +52,13 @@ PAIRS = {
         'epic':          'EURUSD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 1000,
+        'size_override': None,
     },
     'GBPUSD': {
         'epic':          'GBPUSD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 1000,
+        'size_override': None,
     },
 
     # ══════════════════════════════════════
@@ -639,7 +639,7 @@ def check_signal(pair_name, config):
                 f_ema_trend3 = (cur_ema3_f > cur_ema3_m    # [3] Trend×3
                                 > cur_ema3_s)
                 f_ema_slope  = (cur_slope > 0)             # [4] Slope صاعد
-                f_rsi        = (cur_rsi > 50)              # [5] RSI > 50
+                f_rsi        = (cur_rsi > 37)              # [5] RSI > 50
                 f_volume     = cur_vol                     # [6] Volume قوي
 
                 all_pass = all([f_supertrend, f_ema_cross,
@@ -670,7 +670,7 @@ def check_signal(pair_name, config):
                 f_ema_trend3 = (cur_ema3_f < cur_ema3_m    # [3] Trend×3
                                 < cur_ema3_s)
                 f_ema_slope  = (cur_slope < 0)             # [4] Slope هابط
-                f_rsi        = (cur_rsi < 50)              # [5] RSI < 50
+                f_rsi        = (cur_rsi < 65)              # [5] RSI < 50
                 f_volume     = cur_vol                     # [6] Volume قوي
 
                 all_pass = all([f_supertrend, f_ema_cross,
