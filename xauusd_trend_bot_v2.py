@@ -35,7 +35,7 @@ PAIRS = {
         'epic':          'GOLD',
         'allow_buy':     True,
         'allow_sell':    True,
-        'size_override': 0.05,
+        'size_override': None,
     },
     'BTCUSD': {
         'epic':          'BTCUSD',
@@ -71,7 +71,7 @@ PAIRS = {
 
 STRATEGY_TF   = os.getenv('STRATEGY_TF', 'MINUTE_15')
 CANDLES_COUNT = 500
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '30'))
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
 LENGTH       = int(os.getenv('LENGTH',      '10'))
 SLOPE_MULT   = float(os.getenv('SLOPE_MULT', '1.0'))
