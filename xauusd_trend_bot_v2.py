@@ -108,7 +108,7 @@ MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES',   '6'))
 MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS',   '3'))
 ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
 
-_BASE_DIR  = os.getenv('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
+_BASE_DIR  = os.getenv('DATA_DIR', '/tmp')
 DB_FILE    = os.path.join(_BASE_DIR, 'multi_bot.db')
 TRADES_CSV = os.path.join(_BASE_DIR, 'trades_log.csv')
 
