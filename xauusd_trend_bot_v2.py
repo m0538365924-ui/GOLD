@@ -9,7 +9,7 @@
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
-import pandas as np
+import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
