@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==========================================================
-# multi_pairs_bot.py — TL Breaks Bot (v3.2)
-# ✅ Dynamic Risk (Kelly Criterion + Drawdown Protection)
-# ✅ Smart Session Filter (London/NY + Volatility Regime)
-# ✅ Smart Exits (Time-based + Early Exit + Advanced Trailing)
+# multi_pairs_bot.py — TL Breaks Bot (v3.2-fixed)
+# ✅ Fixed: Database schema with pnl_r column
+# ✅ Dynamic Risk (Kelly + Drawdown)
+# ✅ Smart Session Filter
+# ✅ Smart Exits
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
-import pandas as pd
+import pandas as np
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -18,17 +19,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ═══════════════════════════════════════════════════════
-# CONFIG
+# CONFIG - نفس المفاتيح الأصلية
 # ═══════════════════════════════════════════════════════
 API_KEY    = os.getenv('CAPITAL_API_KEY',  'BbmFhEF3FffkcR0Y')
 EMAIL      = os.getenv('CAPITAL_EMAIL',    'almorese2013@gmail.com')
 PASSWORD   = os.getenv('CAPITAL_PASSWORD', 'Ba050326>')
 TG_TOKEN   = os.getenv('TG_TOKEN',         '8782238258:AAEtuQg7OYAmoemhWfLqKdYpqIxfWwyKRSQ')
 TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
-
-
-if not all([API_KEY, EMAIL, PASSWORD]):
-    raise ValueError("API credentials must be set in environment!")
 
 BASE_URL  = 'https://api-capital.backend-capital.com'
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
@@ -85,7 +82,7 @@ EARLY_EXIT_THRESHOLD = -0.4       # خروج مبكر عند -0.4R
 TRAILING_START_R = 2.5            # بدء Trailing عند 2.5R
 TRAILING_ATR_MULT = 1.5             # مسافة Trailing
 
-# --- Partial TP (القديم) ---
+# --- Partial TP ---
 STAGE1_TP_R, STAGE1_PCT = 1.5, 0.50
 STAGE2_TP_R, STAGE2_PCT = 2.5, 0.30
 FINAL_TP_R, FINAL_PCT = 3.5, 0.50
@@ -118,26 +115,76 @@ CSV_HEADERS = [
 
 
 # ═══════════════════════════════════════════════════════
-# UTILS & DATABASE
+# ✅ FIXED: DATABASE WITH MIGRATION
 # ═══════════════════════════════════════════════════════
-def utc_now(): return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-def log(msg): print(f'[{utc_now()}] {msg}', flush=True)
+
+def _migrate_database(conn):
+    """إضافة أعمدة مفقودة تلقائياً"""
+    try:
+        cols = conn.execute("PRAGMA table_info(trades)").fetchall()
+        col_names = {c[1] for c in cols}
+        
+        new_cols = {
+            'pnl_r': 'REAL DEFAULT 0',
+            'pnl_usd': 'REAL DEFAULT 0', 
+            'exit_price': 'REAL',
+            'bars_held': 'INTEGER DEFAULT 0'
+        }
+        
+        for col, col_type in new_cols.items():
+            if col not in col_names:
+                conn.execute(f'ALTER TABLE trades ADD COLUMN {col} {col_type}')
+                log(f'  ✅ Migrated: added column {col}')
+    except Exception as ex:
+        log(f'  ⚠️ Migration warning: {ex}')
 
 def db_init():
     with sqlite3.connect(DB_FILE) as conn:
+        # إنشاء الجدول مع جميع الأعمدة (للجداول الجديدة)
         conn.execute('''CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY, key TEXT UNIQUE, pair TEXT, direction TEXT,
-            timestamp TEXT, entry REAL, sl REAL, tp REAL, atr REAL, size REAL,
-            spread REAL DEFAULT 0, status TEXT DEFAULT 'PENDING',
-            stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0,
-            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0,
-            exit_type TEXT, session_used TEXT, risk_percent REAL
+            id INTEGER PRIMARY KEY, 
+            key TEXT UNIQUE, 
+            pair TEXT, 
+            direction TEXT,
+            timestamp TEXT, 
+            entry REAL, 
+            sl REAL, 
+            tp REAL, 
+            atr REAL, 
+            size REAL,
+            spread REAL DEFAULT 0, 
+            status TEXT DEFAULT 'PENDING',
+            stage1_done INTEGER DEFAULT 0, 
+            stage2_done INTEGER DEFAULT 0,
+            stage3_done INTEGER DEFAULT 0, 
+            final_locked_r REAL DEFAULT 0,
+            exit_type TEXT, 
+            session_used TEXT, 
+            risk_percent REAL,
+            pnl_r REAL DEFAULT 0,           
+            pnl_usd REAL DEFAULT 0,         
+            exit_price REAL,                
+            bars_held INTEGER DEFAULT 0     
         )''')
+        
+        # ✅ migration للجداول القديمة
+        _migrate_database(conn)
+        
         conn.execute('''CREATE TABLE IF NOT EXISTS open_positions (
-            deal_id TEXT PRIMARY KEY, pair TEXT, direction TEXT, entry REAL,
-            sl REAL, tp REAL, atr REAL, size REAL, db_key TEXT, opened_at TEXT,
-            stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0,
-            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0,
+            deal_id TEXT PRIMARY KEY, 
+            pair TEXT, 
+            direction TEXT, 
+            entry REAL,
+            sl REAL, 
+            tp REAL, 
+            atr REAL, 
+            size REAL, 
+            db_key TEXT, 
+            opened_at TEXT,
+            stage1_done INTEGER DEFAULT 0, 
+            stage2_done INTEGER DEFAULT 0,
+            stage3_done INTEGER DEFAULT 0, 
+            final_locked_r REAL DEFAULT 0,
             bars_held INTEGER DEFAULT 0
         )''')
         conn.commit()
@@ -168,17 +215,67 @@ def db_is_dup(key):
             return conn.execute('SELECT id FROM trades WHERE key=?', (key,)).fetchone() is not None
 
 def db_get_recent_trades(pair=None, limit=20):
-    """جلب آخر N صفقة للإحصائيات"""
+    """✅ FIXED: جلب الصفقات مع التعامل مع البيانات القديمة/الجديدة"""
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
+            # التحقق من الأعمدة المتاحة
+            cols = {c[1] for c in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            
+            # ✅ إذا كان pnl_r غير موجود، نستخدم طريقة بديلة
+            if 'pnl_r' not in cols:
+                log(f'  ⚠️ pnl_r not found, using fallback calculation')
+                query = """SELECT pair, direction, status, entry, sl, tp, timestamp 
+                          FROM trades WHERE status IN ('WIN','LOSS')"""
+                params = []
+                if pair:
+                    query += " AND pair=?"
+                    params.append(pair)
+                query += " ORDER BY id DESC LIMIT ?"
+                params.append(limit)
+                
+                rows = conn.execute(query, params).fetchall()
+                
+                # ✅ حساب pnl_r تقريبياً من البيانات المتاحة
+                result = []
+                for r in rows:
+                    pair_name, direction, status, entry, sl, tp, timestamp = r
+                    # تقدير PnL بناءً على النتيجة
+                    if status == 'WIN':
+                        # ربح تقريبي: 2R للفائزين (متوسط)
+                        pnl_r = 2.0
+                    else:
+                        # خسارة: -1R
+                        pnl_r = -1.0
+                    result.append((pair_name, direction, status, pnl_r, timestamp))
+                return result
+            
+            # ✅ الطريقة العادية (إذا كان العمود موجود)
             query = "SELECT pair, direction, status, pnl_r, timestamp FROM trades WHERE status IN ('WIN','LOSS')"
-            params = ()
+            params = []
             if pair:
                 query += " AND pair=?"
-                params = (pair,)
+                params.append(pair)
             query += " ORDER BY id DESC LIMIT ?"
-            params += (limit,)
+            params.append(limit)
+            
             return conn.execute(query, params).fetchall()
+
+def _update_trade_pnl(db_key, pnl_r, pnl_usd, exit_price, bars_held):
+    """تحديث PnL في قاعدة البيانات عند الإغلاق"""
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            try:
+                # ✅ التحقق من وجود الأعمدة أولاً
+                cols = {c[1] for c in conn.execute("PRAGMA table_info(trades)").fetchall()}
+                
+                if 'pnl_r' in cols:
+                    conn.execute(
+                        'UPDATE trades SET pnl_r=?, pnl_usd=?, exit_price=?, bars_held=? WHERE key=?',
+                        (pnl_r, pnl_usd, exit_price, bars_held, db_key)
+                    )
+                    conn.commit()
+            except Exception as ex:
+                log(f'  ⚠️ Could not update PnL: {ex}')
 
 def op_save(deal_id, pair, direction, entry, sl, tp, atr, size, db_key):
     with db_lock:
@@ -219,18 +316,33 @@ def calculate_pnl_since(since_dt):
     """حساب PnL منذ تاريخ معين"""
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
+            # ✅ التحقق من الأعمدة المتاحة
+            cols = {c[1] for c in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            
+            if 'pnl_r' not in cols:
+                # طريقة بديلة: حساب تقريبي
+                rows = conn.execute(
+                    "SELECT status, entry, sl, size, atr FROM trades WHERE timestamp >= ? AND status IN ('WIN','LOSS')",
+                    (since_dt.strftime('%Y-%m-%d %H:%M UTC'),)
+                ).fetchall()
+                
+                total_pnl = 0.0
+                for status, entry, sl, size, atr in rows:
+                    sl_dist = abs(entry - sl) if entry and sl else (atr * SL_ATR_MULT if atr else 0.01)
+                    pnl = sl_dist * size * 100
+                    total_pnl += pnl if status == 'WIN' else -pnl
+                return total_pnl
+            
+            # الطريقة العادية
             rows = conn.execute(
-                "SELECT status, entry, sl, size, atr FROM trades WHERE timestamp >= ? AND status IN ('WIN','LOSS')",
+                "SELECT pnl_r, sl, size FROM trades WHERE timestamp >= ? AND status IN ('WIN','LOSS')",
                 (since_dt.strftime('%Y-%m-%d %H:%M UTC'),)
             ).fetchall()
             
             total_pnl = 0.0
-            for status, entry, sl, size, atr in rows:
-                # تقدير: PnL ≈ ±(ATR × SL_MULT × size × contract_size)
-                # نستخدم تقدير تقريبي
-                sl_dist = abs(entry - sl) if entry and sl else (atr * SL_ATR_MULT if atr else 0.01)
-                pnl = sl_dist * size * 100  # تقدير العقد
-                total_pnl += pnl if status == 'WIN' else -pnl
+            for pnl_r, sl, size in rows:
+                if pnl_r and sl:
+                    total_pnl += pnl_r * abs(sl) * size * 100
             return total_pnl
 
 def check_drawdown_limits():
@@ -276,9 +388,11 @@ def get_pair_stats(pair, lookback=20):
     kelly = max(0, min(kelly, 0.10))
     
     # سلسلة متتالية
-    consecutive_wins = consecutive_losses = max_consec = cur_consec = 0
+    consecutive_wins = consecutive_losses = 0
     cur_type = None
-    for t in sorted(trades, key=lambda x: x[4]):  # حسب الوقت
+    cur_consec = 0
+    
+    for t in sorted(trades, key=lambda x: x[4]):
         if t[2] == 'WIN':
             if cur_type == 'WIN':
                 cur_consec += 1
@@ -392,6 +506,9 @@ def should_trade():
 # ═══════════════════════════════════════════════════════
 # CSV & API HELPERS
 # ═══════════════════════════════════════════════════════
+def utc_now(): return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+def log(msg): print(f'[{utc_now()}] {msg}', flush=True)
+
 def csv_init():
     if not Path(TRADES_CSV).exists():
         with open(TRADES_CSV, 'w', newline='', encoding='utf-8-sig') as f:
@@ -407,6 +524,9 @@ def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0, exit
         
         meta = _meta_cache.get(pair, {}).get('data')
         pnl_usd = round(pnl_pts * size * (meta[3] if meta else 1), 2)
+        
+        # ✅ تحديث قاعدة البيانات أيضاً
+        _update_trade_pnl(pos['db_key'], pnl_r, pnl_usd, exit_price, pos.get('bars_held', 0))
         
         now = datetime.now(timezone.utc)
         row = {
@@ -635,7 +755,7 @@ def tl_value(ai, av, s, up, ci):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ v3.2: SMART EXITS (Time-based + Early Exit + Trailing)
+# ✅ v3.2: SMART EXITS
 # ═══════════════════════════════════════════════════════
 
 def is_momentum_reversing(pair, direction):
@@ -749,7 +869,7 @@ def manage_smart_exits():
                 continue
 
         # ═══════════════════════════════════════════════════════
-        # 3. Partial TP المتدرج (القديم)
+        # 3. Partial TP المتدرج
         # ═══════════════════════════════════════════════════════
         if not s1 and profit_r >= STAGE1_TP_R:
             partial_size = round(size * STAGE1_PCT, 2)
@@ -795,10 +915,9 @@ def manage_smart_exits():
                     tg(f'📈 Progressive: locked {new_locked_r}R')
 
         # ═══════════════════════════════════════════════════════
-        # 5. Trailing للباقي النهائي (بعد Stage 3 أو 2.5R+)
+        # 5. Trailing للباقي النهائي
         # ═══════════════════════════════════════════════════════
         elif (s3 or profit_r >= TRAILING_START_R) and profit_r > pos.get('last_trail_r', 0) + 0.5:
-            # تحديث Trailing كل 0.5R جديدة
             df = fetch_candles(PAIRS[pos['pair']]['epic'], STRATEGY_TF, 50)
             if not df.empty:
                 atr = float(calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1])
@@ -953,7 +1072,7 @@ def run_scan():
         return
 
     log('─' * 60)
-    log(f'🔍 Scan v3.2 | {session_name} | RiskMult:{session_mult:.1f}x | DayPnL:{day_pnl/ACCOUNT_BALANCE:+.1%}')
+    log(f'🔍 Scan v3.2-fixed | {session_name} | RiskMult:{session_mult:.1f}x | DayPnL:{day_pnl/ACCOUNT_BALANCE:+.1%}')
     log('─' * 60)
 
     get_current_balance()
@@ -1013,15 +1132,16 @@ def start_bot():
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
 
     print('=' * 70, flush=True)
-    print(f'  Multi-Pairs Bot v3.2 — Smart Risk + Session + Exits', flush=True)
-    print(f'  ✅ Dynamic Risk: Kelly {KELLY_FRACTION:.0%} | DailyMax {MAX_DAILY_RISK:.0%} | WeeklyMax {MAX_WEEKLY_RISK:.0%}', flush=True)
+    print(f'  Multi-Pairs Bot v3.2-fixed — Database + Smart Features', flush=True)
+    print(f'  ✅ Fixed: pnl_r column with auto-migration', flush=True)
+    print(f'  ✅ Dynamic Risk: Kelly {KELLY_FRACTION:.0%} | DailyMax {MAX_DAILY_RISK:.0%}', flush=True)
     print(f'  ✅ Smart Session: London/NY 1.5x | Asia 0.5x | Quiet 0.3x', flush=True)
-    print(f'  ✅ Smart Exits: Time({MAX_TRADE_DURATION_BARS}bars) | Early({EARLY_EXIT_THRESHOLD}R) | Trail({TRAILING_START_R}R)', flush=True)
-    print(f'  💰 Partial: 1.5R→50% | 2.5R→30%+0.5R lock | 3.5R→50%+2R lock', flush=True)
+    print(f'  ✅ Smart Exits: Time({MAX_TRADE_DURATION_BARS}bars) | Early({EARLY_EXIT_THRESHOLD}R)', flush=True)
     print('=' * 70, flush=True)
 
     nl = '\n'
-    tg(f'🚀 *Bot v3.2* [{mode}]{nl}'
+    tg(f'🚀 *Bot v3.2-fixed* [{mode}]{nl}'
+       f'✅ Database: auto-migration enabled{nl}'
        f'📊 Dynamic Risk: Kelly `{KELLY_FRACTION:.0%}` | Daily `{MAX_DAILY_RISK:.0%}`{nl}'
        f'⏰ Smart Session: London/NY `1.5x`{nl}'
        f'🚪 Smart Exits: Time `{MAX_TRADE_DURATION_BARS}` | Early `{EARLY_EXIT_THRESHOLD}R`{nl}'
