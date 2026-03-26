@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==========================================================
-# multi_pairs_bot.py — TL Breaks + Multi-Filter Bot (v3.1)
-# XAUUSD + BTCUSD + EURUSD + GBPUSD + US100 + US500
-# Capital.com API
-# ✅ v3.0: منطق معكوس (شراء من قاع، بيع من قمة)
-# ✅ v3.1: Partial TP متدرج + Progressive SL (لا انحداف للربح)
+# multi_pairs_bot.py — TL Breaks Bot (v3.2)
+# ✅ Dynamic Risk (Kelly Criterion + Drawdown Protection)
+# ✅ Smart Session Filter (London/NY + Volatility Regime)
+# ✅ Smart Exits (Time-based + Early Exit + Advanced Trailing)
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from threading import Lock
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ═══════════════════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════
@@ -32,7 +28,7 @@ TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
 
 
 if not all([API_KEY, EMAIL, PASSWORD]):
-    raise ValueError("CAPITAL_API_KEY, CAPITAL_EMAIL, CAPITAL_PASSWORD must be set!")
+    raise ValueError("API credentials must be set in environment!")
 
 BASE_URL  = 'https://api-capital.backend-capital.com'
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
@@ -50,52 +46,65 @@ STRATEGY_TF   = os.getenv('STRATEGY_TF', 'MINUTE_15')
 CANDLES_COUNT = 500
 SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
-LENGTH       = int(os.getenv('LENGTH', '10'))
-SLOPE_MULT   = float(os.getenv('SLOPE_MULT', '1.0'))
-SLOPE_METHOD = os.getenv('SLOPE_METHOD', 'ATR')
-ATR_PERIOD   = 14
-SL_ATR_MULT  = 1.5
-TP_ATR_MULT  = 3.0
+LENGTH, SLOPE_MULT, SLOPE_METHOD = int(os.getenv('LENGTH', '10')), float(os.getenv('SLOPE_MULT', '1.0')), os.getenv('SLOPE_METHOD', 'ATR')
+ATR_PERIOD, SL_ATR_MULT, TP_ATR_MULT = 14, 1.5, 3.0
 
 # ═══════════════════════════════════════════════════════
-# ✅ v3.1: إعدادات Partial TP المتدرج + Progressive SL
+# ✅ v3.2: إعدادات جديدة
 # ═══════════════════════════════════════════════════════
-STAGE1_TP_R     = 1.5   # أول Partial TP
-STAGE1_PCT      = 0.50  # 50% من الحجم
 
-STAGE2_TP_R     = 2.5   # ثاني Partial TP  
-STAGE2_PCT      = 0.30  # 30% من الباقي (15% إجمالي)
+# --- Dynamic Risk ---
+BASE_RISK_PERCENT = 0.01      # 1% افتراضي
+KELLY_FRACTION = 0.25       # ربع Kelly (محافظ)
+MAX_RISK_PERCENT = 0.03     # 3% سقف المخاطرة
+MIN_RISK_PERCENT = 0.005    # 0.5% أدنى المخاطرة
 
-FINAL_TP_R      = 3.5   # ثالث Partial TP
-FINAL_PCT       = 0.50  # 50% من المتبقي (17.5% إجمالي)
+MAX_DAILY_RISK = 0.05       # 5% خسارة يومية كحد أقصى
+MAX_WEEKLY_RISK = 0.10      # 10% خسارة أسبوعية
+DAILY_PROFIT_TARGET = 0.03  # 3% هدف يومي (قفل الأرباح)
 
-# الباقي ~17.5% يجري مع Trailing حتى النهاية
-
-# Progressive SL: تأمين ربح تدريجي للباقي
-PROGRESSIVE_LOCK = {
-    2.0: 0.5,   # عند 2.0R: 0.5R مضمون
-    2.5: 1.0,   # عند 2.5R: 1.0R مضمون (بعد Stage 2)
-    3.0: 1.5,   # عند 3.0R: 1.5R مضمون
-    3.5: 2.0,   # عند 3.5R: 2.0R مضمون
-    4.5: 3.0,   # عند 4.5R: 3.0R مضمون
-    6.0: 4.0,   # عند 6.0R: 4.0R مضمون
+# --- Smart Session ---
+SESSIONS = {
+    'ASIA': {'start': 0, 'end': 7, 'risk_mult': 0.5, 'name': 'آسيا (هادئ)'},
+    'LONDON_OPEN': {'start': 7, 'end': 10, 'risk_mult': 1.2, 'name': 'فتح لندن'},
+    'LONDON_MID': {'start': 10, 'end': 12, 'risk_mult': 1.0, 'name': 'منتصف لندن'},
+    'LONDON_NY': {'start': 12, 'end': 16, 'risk_mult': 1.5, 'name': 'تداخل لندن-نيويورك ⭐'},
+    'NY_PM': {'start': 16, 'end': 20, 'risk_mult': 0.7, 'name': 'بعد الظهر الأمريكي'},
+    'QUIET': {'start': 20, 'end': 24, 'risk_mult': 0.3, 'name': 'هادئ (تجنب)'},
 }
 
-TRAILING_ATR_MULT = 2.0  # للباقي النهائي
+VOLATILITY_THRESHOLDS = {
+    'EXTREME': 2.0,   # تقلب مفرط - توقف
+    'HIGH': 1.5,      # تقلب عالٍ - تقليل
+    'LOW': 0.6,       # تقلب منخفض - تقليل
+}
 
-RSI_SELL_MIN, RSI_SELL_MAX = 55, 78   # ذروة شراء = بيع
-RSI_BUY_MIN, RSI_BUY_MAX   = 22, 45   # ذروة بيع = شراء
+# --- Smart Exits ---
+MAX_TRADE_DURATION_BARS = 24      # 6 ساعات في M15
+EARLY_EXIT_THRESHOLD = -0.4       # خروج مبكر عند -0.4R
+TRAILING_START_R = 2.5            # بدء Trailing عند 2.5R
+TRAILING_ATR_MULT = 1.5             # مسافة Trailing
+
+# --- Partial TP (القديم) ---
+STAGE1_TP_R, STAGE1_PCT = 1.5, 0.50
+STAGE2_TP_R, STAGE2_PCT = 2.5, 0.30
+FINAL_TP_R, FINAL_PCT = 3.5, 0.50
+
+PROGRESSIVE_LOCK = {2.0: 0.5, 2.5: 1.0, 3.0: 1.5, 3.5: 2.0, 4.5: 3.0, 6.0: 4.0}
+
+# --- RSI ---
+RSI_SELL_MIN, RSI_SELL_MAX = 55, 78
+RSI_BUY_MIN, RSI_BUY_MAX = 22, 45
 
 SPREAD_ATR_MAX = 0.25
-SESSION_START, SESSION_END = 0, 23
 
-RISK_PERCENT         = float(os.getenv('RISK_PERCENT', '0.01'))
-MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES', '6'))
+RISK_PERCENT = float(os.getenv('RISK_PERCENT', '0.01'))
+MAX_OPEN_TRADES = int(os.getenv('MAX_OPEN_TRADES', '6'))
 MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS', '3'))
-ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
+ACCOUNT_BALANCE = float(os.getenv('ACCOUNT_BALANCE', '1000'))
 
-_BASE_DIR  = os.getenv('DATA_DIR', '/tmp')
-DB_FILE    = os.path.join(_BASE_DIR, 'multi_bot.db')
+_BASE_DIR = os.getenv('DATA_DIR', '/tmp')
+DB_FILE = os.path.join(_BASE_DIR, 'multi_bot.db')
 TRADES_CSV = os.path.join(_BASE_DIR, 'trades_log.csv')
 
 db_lock, session_headers, _meta_cache = Lock(), {}, {}
@@ -103,8 +112,8 @@ db_lock, session_headers, _meta_cache = Lock(), {}, {}
 CSV_HEADERS = [
     'date', 'time_utc', 'pair', 'direction', 'entry', 'sl', 'tp', 'exit_price',
     'atr', 'size', 'sl_dist', 'pnl_usd', 'pnl_r', 'result', 'bars_held', 'spread', 'tf',
-    'stage1_done', 'stage2_done', 'stage3_done', 'final_locked_r',
-    'supertrend', 'rsi', 'ema_fast', 'ema_slow',
+    'stage1_done', 'stage2_done', 'stage3_done', 'final_locked_r', 'exit_type',
+    'session_used', 'risk_percent', 'supertrend', 'rsi', 'ema_fast', 'ema_slow',
 ]
 
 
@@ -120,38 +129,56 @@ def db_init():
             id INTEGER PRIMARY KEY, key TEXT UNIQUE, pair TEXT, direction TEXT,
             timestamp TEXT, entry REAL, sl REAL, tp REAL, atr REAL, size REAL,
             spread REAL DEFAULT 0, status TEXT DEFAULT 'PENDING',
-            stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0, 
-            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0
+            stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0,
+            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0,
+            exit_type TEXT, session_used TEXT, risk_percent REAL
         )''')
         conn.execute('''CREATE TABLE IF NOT EXISTS open_positions (
             deal_id TEXT PRIMARY KEY, pair TEXT, direction TEXT, entry REAL,
             sl REAL, tp REAL, atr REAL, size REAL, db_key TEXT, opened_at TEXT,
             stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0,
-            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0
+            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0,
+            bars_held INTEGER DEFAULT 0
         )''')
         conn.commit()
 
-def db_save(key, pair, direction, entry, sl, tp, atr, size, spread=0.0):
+def db_save(key, pair, direction, entry, sl, tp, atr, size, spread, risk_pct, session):
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
             try:
                 conn.execute(
-                    'INSERT INTO trades (key,pair,direction,timestamp,entry,sl,tp,atr,size,spread) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                    (key, pair, direction, utc_now(), entry, sl, tp, atr, size, spread)
+                    'INSERT INTO trades (key,pair,direction,timestamp,entry,sl,tp,atr,size,spread,risk_percent,session_used) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (key, pair, direction, utc_now(), entry, sl, tp, atr, size, spread, risk_pct, session)
                 )
                 conn.commit()
             except sqlite3.IntegrityError: pass
 
-def db_update(key, status): 
+def db_update(key, status, exit_type=None):
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
-            conn.execute('UPDATE trades SET status=? WHERE key=?', (status, key))
+            if exit_type:
+                conn.execute('UPDATE trades SET status=?, exit_type=? WHERE key=?', (status, exit_type, key))
+            else:
+                conn.execute('UPDATE trades SET status=? WHERE key=?', (status, key))
             conn.commit()
 
 def db_is_dup(key):
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
             return conn.execute('SELECT id FROM trades WHERE key=?', (key,)).fetchone() is not None
+
+def db_get_recent_trades(pair=None, limit=20):
+    """جلب آخر N صفقة للإحصائيات"""
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            query = "SELECT pair, direction, status, pnl_r, timestamp FROM trades WHERE status IN ('WIN','LOSS')"
+            params = ()
+            if pair:
+                query += " AND pair=?"
+                params = (pair,)
+            query += " ORDER BY id DESC LIMIT ?"
+            params += (limit,)
+            return conn.execute(query, params).fetchall()
 
 def op_save(deal_id, pair, direction, entry, sl, tp, atr, size, db_key):
     with db_lock:
@@ -185,6 +212,184 @@ def op_delete(deal_id):
 
 
 # ═══════════════════════════════════════════════════════
+# ✅ v3.2: DYNAMIC RISK MANAGEMENT (Kelly + Drawdown)
+# ═══════════════════════════════════════════════════════
+
+def calculate_pnl_since(since_dt):
+    """حساب PnL منذ تاريخ معين"""
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            rows = conn.execute(
+                "SELECT status, entry, sl, size, atr FROM trades WHERE timestamp >= ? AND status IN ('WIN','LOSS')",
+                (since_dt.strftime('%Y-%m-%d %H:%M UTC'),)
+            ).fetchall()
+            
+            total_pnl = 0.0
+            for status, entry, sl, size, atr in rows:
+                # تقدير: PnL ≈ ±(ATR × SL_MULT × size × contract_size)
+                # نستخدم تقدير تقريبي
+                sl_dist = abs(entry - sl) if entry and sl else (atr * SL_ATR_MULT if atr else 0.01)
+                pnl = sl_dist * size * 100  # تقدير العقد
+                total_pnl += pnl if status == 'WIN' else -pnl
+            return total_pnl
+
+def check_drawdown_limits():
+    """التحقق من حدود الخسارة اليومية والأسبوعية"""
+    now = datetime.now(timezone.utc)
+    balance = get_current_balance()
+    
+    # يومي
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_pnl = calculate_pnl_since(day_start)
+    
+    if day_pnl <= -balance * MAX_DAILY_RISK:
+        return False, f'🛑 DAILY LIMIT: {day_pnl/balance:.1%} loss', 0.0
+    
+    if day_pnl >= balance * DAILY_PROFIT_TARGET:
+        return False, f'🔒 DAILY TARGET HIT: +{day_pnl/balance:.1%}', 0.0
+    
+    # أسبوعي
+    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0)
+    week_pnl = calculate_pnl_since(week_start)
+    
+    if week_pnl <= -balance * MAX_WEEKLY_RISK:
+        return False, f'🛑 WEEKLY LIMIT: {week_pnl/balance:.1%} loss', 0.0
+    
+    return True, 'OK', day_pnl
+
+def get_pair_stats(pair, lookback=20):
+    """إحصائيات أداء الزوج"""
+    trades = db_get_recent_trades(pair, lookback)
+    if len(trades) < 5:
+        return None
+    
+    wins = [t for t in trades if t[2] == 'WIN']
+    losses = [t for t in trades if t[2] == 'LOSS']
+    
+    win_rate = len(wins) / len(trades)
+    avg_win_r = np.mean([t[3] for t in wins]) if wins else 0
+    avg_loss_r = abs(np.mean([t[3] for t in losses])) if losses else 1
+    
+    # حساب Kelly
+    if avg_loss_r == 0: avg_loss_r = 1
+    kelly = (win_rate * (avg_win_r/avg_loss_r) - (1 - win_rate)) / (avg_win_r/avg_loss_r) if avg_win_r > 0 else 0
+    kelly = max(0, min(kelly, 0.10))
+    
+    # سلسلة متتالية
+    consecutive_wins = consecutive_losses = max_consec = cur_consec = 0
+    cur_type = None
+    for t in sorted(trades, key=lambda x: x[4]):  # حسب الوقت
+        if t[2] == 'WIN':
+            if cur_type == 'WIN':
+                cur_consec += 1
+            else:
+                cur_consec = 1
+                cur_type = 'WIN'
+            consecutive_wins = max(consecutive_wins, cur_consec)
+        else:
+            if cur_type == 'LOSS':
+                cur_consec += 1
+            else:
+                cur_consec = 1
+                cur_type = 'LOSS'
+            consecutive_losses = max(consecutive_losses, cur_consec)
+    
+    return {
+        'total': len(trades), 'win_rate': win_rate,
+        'avg_win_r': avg_win_r, 'avg_loss_r': avg_loss_r,
+        'kelly': kelly, 'consecutive_wins': consecutive_wins,
+        'consecutive_losses': consecutive_losses,
+        'profit_factor': (len(wins) * avg_win_r) / (len(losses) * avg_loss_r) if losses and avg_loss_r > 0 else float('inf')
+    }
+
+def calculate_dynamic_risk(pair, base_risk=BASE_RISK_PERCENT):
+    """حساب المخاطرة الديناميكية"""
+    stats = get_pair_stats(pair)
+    
+    if not stats:
+        return base_risk, 'default (no stats)'
+    
+    risk = base_risk
+    
+    # تطبيق Kelly (ربع فقط)
+    kelly_risk = stats['kelly'] * KELLY_FRACTION
+    if stats['win_rate'] > 0.5 and stats['profit_factor'] > 1.5:
+        risk = max(risk, min(kelly_risk, MAX_RISK_PERCENT))
+        reason = f'kelly:{kelly_risk:.2%}'
+    else:
+        reason = 'base'
+    
+    # تقليل في سلسلة خسائر
+    if stats['consecutive_losses'] >= 3:
+        risk *= 0.4
+        reason += ' | 3+ losses (40%)'
+    elif stats['consecutive_losses'] == 2:
+        risk *= 0.6
+        reason += ' | 2 losses (60%)'
+    
+    # تقليل في Win Rate منخفض
+    if stats['win_rate'] < 0.35:
+        risk *= 0.7
+        reason += ' | low WR (70%)'
+    
+    # زيادة محدودة في سلسلة أرباح
+    if stats['consecutive_wins'] >= 3 and stats['win_rate'] > 0.6:
+        risk = min(risk * 1.3, MAX_RISK_PERCENT)
+        reason += ' | hot streak (+30%)'
+    
+    return max(MIN_RISK_PERCENT, min(risk, MAX_RISK_PERCENT)), reason
+
+
+# ═══════════════════════════════════════════════════════
+# ✅ v3.2: SMART SESSION FILTER
+# ═══════════════════════════════════════════════════════
+
+def get_session_info():
+    """احصل على معلومات الجلسة الحالية"""
+    hour = datetime.now(timezone.utc).hour
+    
+    for session_name, config in SESSIONS.items():
+        if config['start'] <= hour < config['end']:
+            return config['risk_mult'], config['name'], session_name
+    
+    return 0.0, 'مغلقة', 'CLOSED'
+
+def check_volatility_regime(epic):
+    """تحقق من نظام التقلب"""
+    df = fetch_candles(epic, STRATEGY_TF, 100)
+    if df.empty or len(df) < 50:
+        return 'UNKNOWN', 1.0
+    
+    atr_current = calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1]
+    atr_hist = calc_atr_series(df.iloc[:-20], ATR_PERIOD).iloc[-20:].mean()
+    
+    ratio = atr_current / atr_hist if atr_hist > 0 else 1
+    
+    if ratio > VOLATILITY_THRESHOLDS['EXTREME']:
+        return 'EXTREME', 0.0  # توقف
+    elif ratio > VOLATILITY_THRESHOLDS['HIGH']:
+        return 'HIGH', 0.7     # تقليل
+    elif ratio < VOLATILITY_THRESHOLDS['LOW']:
+        return 'LOW', 0.6      # تقليل
+    else:
+        return 'NORMAL', 1.0
+
+def should_trade():
+    """التحقق النهائي من الجاهزية للتداول"""
+    # 1. حدود الخسارة
+    allowed, reason, day_pnl = check_drawdown_limits()
+    if not allowed:
+        return False, reason, 0.0, None, 0.0
+    
+    # 2. الجلسة
+    session_mult, session_name, session_code = get_session_info()
+    if session_mult == 0:
+        return False, f'⏸ خارج الجلسات: {session_name}', 0.0, None, 0.0
+    
+    return True, 'OK', session_mult, session_name, day_pnl
+
+
+# ═══════════════════════════════════════════════════════
 # CSV & API HELPERS
 # ═══════════════════════════════════════════════════════
 def csv_init():
@@ -192,7 +397,7 @@ def csv_init():
         with open(TRADES_CSV, 'w', newline='', encoding='utf-8-sig') as f:
             csv.DictWriter(f, fieldnames=CSV_HEADERS).writeheader()
 
-def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0):
+def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0, exit_type=''):
     try:
         entry, sl, size, dir_, pair = pos['entry'], pos['sl'], pos['size'], pos['direction'], pos['pair']
         sl_dist = abs(entry - sl)
@@ -209,20 +414,22 @@ def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0):
             'pair': pair, 'direction': dir_, 'entry': entry, 'sl': sl, 'tp': pos['tp'],
             'exit_price': exit_price, 'atr': pos['atr'], 'size': size,
             'sl_dist': round(sl_dist, 5), 'pnl_usd': pnl_usd, 'pnl_r': pnl_r,
-            'result': result, 'bars_held': 0, 'spread': pos.get('spread', 0),
-            'tf': STRATEGY_TF, 'stage1_done': stage1, 'stage2_done': stage2,
-            'stage3_done': stage3, 'final_locked_r': final_r,
+            'result': result, 'bars_held': pos.get('bars_held', 0),
+            'spread': pos.get('spread', 0), 'tf': STRATEGY_TF,
+            'stage1_done': stage1, 'stage2_done': stage2, 'stage3_done': stage3,
+            'final_locked_r': final_r, 'exit_type': exit_type,
+            'session_used': pos.get('session_used', ''), 'risk_percent': pos.get('risk_percent', 0),
             'supertrend': 0, 'rsi': 0, 'ema_fast': 0, 'ema_slow': 0,
         }
         with open(TRADES_CSV, 'a', newline='', encoding='utf-8-sig') as f:
             csv.DictWriter(f, fieldnames=CSV_HEADERS).writerow(row)
 
         icon = '✅' if result == 'WIN' else ('❌' if result == 'LOSS' else '🔵')
-        stages = f' | S1:{stage1} S2:{stage2} S3:{stage3} Locked:{final_r}R' if any([stage1,stage2,stage3]) else ''
-        log(f'  {icon} CLOSED {pair} {dir_} | PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R){stages}')
+        stages = f' | S1:{stage1} S2:{stage2} S3:{stage3}' if any([stage1,stage2,stage3]) else ''
+        log(f'  {icon} CLOSED {pair} {dir_} | {exit_type} | PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R){stages}')
         
         nl = '\n'
-        tg(f'{icon} *{pair} {dir_} — {result}*{stages}{nl}Entry: `{entry}` → Exit: `{exit_price}`{nl}PnL: `${pnl_usd:+.2f}` | `{pnl_r:+.2f}R`{nl}_{utc_now()}_')
+        tg(f'{icon} *{pair} {dir_} — {result}*{nl}Exit: `{exit_type}`{nl}PnL: `${pnl_usd:+.2f}` | `{pnl_r:+.2f}R`{nl}_{utc_now()}_')
         return result, pnl_usd
     except Exception as ex:
         log(f'  csv_log_trade ERROR: {ex}')
@@ -252,6 +459,10 @@ def _put(path, body):
     try: return requests.put(BASE_URL + path, headers=session_headers, json=body, timeout=10)
     except Exception as ex: log(f'  PUT {path}: {ex}')
 
+def _delete(path):
+    try: return requests.delete(BASE_URL + path, headers=session_headers, timeout=10)
+    except Exception as ex: log(f'  DELETE {path}: {ex}')
+
 def create_session():
     url, hdrs = BASE_URL + '/api/v1/session', {'X-CAP-API-KEY': API_KEY, 'Content-Type': 'application/json'}
     try:
@@ -267,12 +478,14 @@ def create_session():
     return False
 
 def ping_session(): _get('/api/v1/ping')
-def get_balance():
+
+def get_current_balance():
     global ACCOUNT_BALANCE
     r = _get('/api/v1/accounts')
     if r and r.status_code == 200:
         accs = r.json().get('accounts', [])
         if accs: ACCOUNT_BALANCE = float(accs[0].get('balance', {}).get('available', ACCOUNT_BALANCE))
+    return ACCOUNT_BALANCE
 
 def get_open_positions():
     r = _get('/api/v1/positions')
@@ -322,6 +535,12 @@ def close_partial_api(deal_id, size):
         log(f'  💰 Partial close: {size} units'); return True
     log(f'  ❌ Partial close failed: {r.text[:100] if r else "no response"}'); return False
 
+def close_full_api(deal_id):
+    r = _delete(f'/api/v1/positions/{deal_id}')
+    if r and r.status_code == 200:
+        log(f'  🚪 Full close'); return True
+    return False
+
 
 # ═══════════════════════════════════════════════════════
 # TELEGRAM
@@ -333,13 +552,15 @@ def tg(text):
                       data={'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
     except: pass
 
-def tg_signal(sig, filters_info):
+def tg_signal(sig, filters_info, risk_info, session_info):
     icon, mode = ('🟢' if sig['direction'] == 'BUY' else '🔴'), ('DEMO' if DEMO_MODE else 'LIVE')
-    entry_type, nl = ('قاع📉' if sig['direction'] == 'BUY' else 'قمة📈'), '\n'
+    entry_type = 'قاع📉' if sig['direction'] == 'BUY' else 'قمة📈'
+    nl = '\n'
     tg(f'{icon} *{sig["pair"]} {sig["direction"]}* [{mode}] {entry_type}{nl}'
        f'Entry: `{sig["entry"]}` | SL: `{sig["sl"]}` | TP: `{sig["tp"]}`{nl}'
+       f'Risk: `{risk_info[0]:.2%}` ({risk_info[1]}){nl}'
+       f'Session: `{session_info}`{nl}'
        f'Stages: `1.5R→50%` | `2.5R→30%` | `3.5R→50% of rest`{nl}'
-       f'Progressive: `2R→0.5R` | `2.5R→1R` | `3R→1.5R`...{nl}'
        f'_{utc_now()}_')
 
 
@@ -414,9 +635,45 @@ def tl_value(ai, av, s, up, ci):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ v3.1: MANAGE OPEN POSITIONS — Partial TP متدرج + Progressive SL
+# ✅ v3.2: SMART EXITS (Time-based + Early Exit + Trailing)
 # ═══════════════════════════════════════════════════════
-def manage_open_positions():
+
+def is_momentum_reversing(pair, direction):
+    """تحقق من انعكاس الزخم في M5"""
+    df = fetch_candles(PAIRS[pair]['epic'], 'MINUTE_5', 10)
+    if df.empty or len(df) < 5: return False
+    
+    rsi = calc_rsi(df['close'], 5)
+    if len(rsi) < 3: return False
+    
+    rsi_now, rsi_prev = rsi.iloc[-1], rsi.iloc[-2]
+    
+    if direction == 'BUY' and rsi_now < rsi_prev - 3: return True
+    if direction == 'SELL' and rsi_now > rsi_prev + 3: return True
+    return False
+
+def calculate_sl_at_r(pos, locked_r):
+    entry, dir_, sl_dist = pos['entry'], pos['direction'], abs(pos['entry'] - pos['sl'])
+    if dir_ == 'BUY': return round(entry + (locked_r * sl_dist), 5)
+    else: return round(entry - (locked_r * sl_dist), 5)
+
+def get_progressive_lock(profit_r):
+    for threshold, locked in sorted(PROGRESSIVE_LOCK.items(), reverse=True):
+        if profit_r >= threshold: return locked, f'@ {threshold}R'
+    return 0, 'none'
+
+def should_move_sl(current_sl, new_sl, direction):
+    if direction == 'BUY': return new_sl > current_sl + 0.00001
+    else: return new_sl < current_sl - 0.00001
+
+def calculate_trailing_sl(pos, cur_price, atr):
+    dir_ = pos['direction']
+    trail_dist = atr * TRAILING_ATR_MULT
+    if dir_ == 'BUY': return round(cur_price - trail_dist, 5)
+    else: return round(cur_price + trail_dist, 5)
+
+def manage_smart_exits():
+    """إدارة خروج ذكية شاملة"""
     tracked = op_get_all()
     if not tracked: return
     
@@ -428,17 +685,17 @@ def manage_open_positions():
         
         # ✅ تسجيل الإغلاق الكامل
         if deal_id not in live_ids:
-            log(f'  📋 {pos["pair"]} {deal_id} أُغلقت — نسجّلها')
             exit_price = get_closed_deal_price(deal_id, get_current_price(pos['pair']))
             if exit_price > 0:
                 result, _ = csv_log_trade(pos, exit_price, pos['stage1_done'], 
-                                          pos['stage2_done'], pos['stage3_done'], pos['final_locked_r'])
+                                          pos['stage2_done'], pos['stage3_done'],
+                                          pos['final_locked_r'], 'STOP_OUT')
                 if result != 'ERROR':
-                    db_update(pos['db_key'], result.upper() if result in ('WIN','LOSS','BE') else 'CLOSED')
+                    db_update(pos['db_key'], result.upper() if result in ('WIN','LOSS','BE') else 'CLOSED', 'STOP_OUT')
                     op_delete(deal_id)
             continue
 
-        # ✅ حساب الربح الحالي
+        # ✅ حساب الربح والمدة
         cur_price = get_current_price(pos['pair'])
         if cur_price <= 0: continue
         
@@ -449,144 +706,129 @@ def manage_open_positions():
         profit_pts = (cur_price - entry) if dir_ == 'BUY' else (entry - cur_price)
         profit_r = profit_pts / sl_dist
         
+        # ✅ تحديث عدد الشمعات
+        bars_held = pos.get('bars_held', 0) + 1
+        op_update(deal_id, bars_held=bars_held)
+        
         s1, s2, s3 = pos['stage1_done'], pos['stage2_done'], pos['stage3_done']
-        log(f'  📊 {pos["pair"]} {dir_} | R={profit_r:.2f} | S1:{s1} S2:{s2} S3:{s3} | Locked:{pos["final_locked_r"]}R')
+        log(f'  📊 {pos["pair"]} {dir_} | R={profit_r:.2f} | Bars={bars_held} | S1:{s1} S2:{s2} S3:{s3}')
 
         # ═══════════════════════════════════════════════════════
-        # المرحلة 1: Partial TP 50% عند 1.5R
+        # 1. SMART EXIT: خروج زمني (Time-based Exit)
+        # ═══════════════════════════════════════════════════════
+        if bars_held > MAX_TRADE_DURATION_BARS and profit_r < 0.5:
+            log(f'  ⏰ TIME EXIT: {bars_held} bars, profit {profit_r:.2f}R')
+            if close_full_api(deal_id):
+                result, _ = csv_log_trade(pos, cur_price, s1, s2, s3, pos['final_locked_r'], 'TIME_EXIT')
+                db_update(pos['db_key'], result, 'TIME_EXIT')
+                op_delete(deal_id)
+                
+                nl = '\n'
+                tg(f'⏰ *Time Exit — {pos["pair"]} {dir_}*{nl}'
+                   f'مدة طويلة ({bars_held} شمعة) بدون ربح حقيقي{nl}'
+                   f'أُغلقت @ `{cur_price}` | PnL: `{profit_r:.2f}R`{nl}'
+                   f'_{utc_now()}_')
+            continue
+
+        # ═══════════════════════════════════════════════════════
+        # 2. SMART EXIT: خروج مبكر (Early Exit)
+        # ═══════════════════════════════════════════════════════
+        if EARLY_EXIT_THRESHOLD < profit_r < -0.2:  # بين -0.4 و -0.2
+            if is_momentum_reversing(pos['pair'], dir_):
+                log(f'  🔄 EARLY EXIT: momentum reversing @ {profit_r:.2f}R')
+                if close_full_api(deal_id):
+                    result, _ = csv_log_trade(pos, cur_price, s1, s2, s3, pos['final_locked_r'], 'EARLY_EXIT')
+                    db_update(pos['db_key'], result, 'EARLY_EXIT')
+                    op_delete(deal_id)
+                    
+                    nl = '\n'
+                    tg(f'🔄 *Early Exit — {pos["pair"]} {dir_}*{nl}'
+                       f'انعكاس زخم مبكر @ `{profit_r:.2f}R`{nl}'
+                       f'خسارة أقل من SL الكامل ✅{nl}'
+                       f'_{utc_now()}_')
+                continue
+
+        # ═══════════════════════════════════════════════════════
+        # 3. Partial TP المتدرج (القديم)
         # ═══════════════════════════════════════════════════════
         if not s1 and profit_r >= STAGE1_TP_R:
             partial_size = round(size * STAGE1_PCT, 2)
             _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
-            
             if partial_size >= min_sz and close_partial_api(deal_id, partial_size):
                 op_update(deal_id, stage1_done=1)
-                remaining = size - partial_size
-                
                 nl = '\n'
                 tg(f'💰 *Stage 1 — {pos["pair"]} {dir_}*{nl}'
-                   f'أغلقنا `{partial_size}` وحطة ({int(STAGE1_PCT*100)}%){nl}'
-                   f'عند `+{profit_r:.2f}R` | السعر: `{round(cur_price,5)}`{nl}'
-                   f'متبقي: `{remaining}` وحدة | SL الأصلي: 🔓 مفتوح{nl}'
+                   f'50% @ `{profit_r:.2f}R` | SL مفتوح 🔓{nl}'
                    f'_{utc_now()}_')
-                log(f'  💰 Stage 1: {partial_size} closed, {remaining} remaining, SL unchanged')
 
-        # ═══════════════════════════════════════════════════════
-        # المرحلة 2: Partial TP 30% عند 2.5R (من الباقي)
-        # ═══════════════════════════════════════════════════════
         elif s1 and not s2 and profit_r >= STAGE2_TP_R:
-            remaining_after_s1 = size * (1 - STAGE1_PCT)
-            stage2_size = round(remaining_after_s1 * (STAGE2_PCT / (1 - STAGE1_PCT)), 2)
+            remaining = size * (1 - STAGE1_PCT)
+            stage2_size = round(remaining * (STAGE2_PCT / (1 - STAGE1_PCT)), 2)
             _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
-            
             if stage2_size >= min_sz and close_partial_api(deal_id, stage2_size):
-                # ✅ الآن نحرك SL إلى 0.5R مضمون (ليس BE!)
                 new_sl = calculate_sl_at_r(pos, 0.5)
                 if new_sl and update_sl_api(deal_id, new_sl, tp):
                     op_update(deal_id, stage2_done=1, final_locked_r=0.5, sl=new_sl)
-                    
-                    remaining = size * (1 - STAGE1_PCT) * (1 - STAGE2_PCT / (1 - STAGE1_PCT))
-                    
                     nl = '\n'
                     tg(f'💰💰 *Stage 2 — {pos["pair"]} {dir_}*{nl}'
-                       f'أغلقنا `{stage2_size}` وحدة إضافية ({int(STAGE2_PCT*100)}% من الباقي){nl}'
-                       f'عند `+{profit_r:.2f}R` | SL → `+0.5R` مضمون 🔒{nl}'
-                       f'متبقي: `{round(remaining,2)}` وحدة | Progressive SL يعمل...{nl}'
+                       f'+30% | SL → `+0.5R` 🔒{nl}'
                        f'_{utc_now()}_')
-                    log(f'  💰💰 Stage 2: {stage2_size} closed, SL locked at +0.5R')
 
-        # ═══════════════════════════════════════════════════════
-        # المرحلة 3: Partial TP 50% من المتبقي عند 3.5R
-        # ═══════════════════════════════════════════════════════
         elif s2 and not s3 and profit_r >= FINAL_TP_R:
-            remaining_after_s2 = size * (1 - STAGE1_PCT) * (1 - STAGE2_PCT / (1 - STAGE1_PCT))
-            final_size = round(remaining_after_s2 * FINAL_PCT, 2)
+            remaining = size * (1 - STAGE1_PCT) * (1 - STAGE2_PCT / (1 - STAGE1_PCT))
+            final_size = round(remaining * FINAL_PCT, 2)
             _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
-            
             if final_size >= min_sz and close_partial_api(deal_id, final_size):
-                # ✅ SL إلى 2R مضمون
                 new_sl = calculate_sl_at_r(pos, 2.0)
                 if new_sl and update_sl_api(deal_id, new_sl, tp):
-                    final_remaining = remaining_after_s2 * (1 - FINAL_PCT)
                     op_update(deal_id, stage3_done=1, final_locked_r=2.0, sl=new_sl)
-                    
-                    nl = '\n'
-                    tg(f'💰💰💰 *Stage 3 — {pos["pair"]} {dir_}*{nl}'
-                       f'أغلقنا `{final_size}` وحدة أخيرة ({int(FINAL_PCT*100)}% من المتبقي){nl}'
-                       f'عند `+{profit_r:.2f}R` | SL → `+2R` مضمون 🔒🔒{nl}'
-                       f'باقي نهائي: `{round(final_remaining,2)}` وحدة | Trailing فقط{nl}'
-                       f'_{utc_now()}_')
-                    log(f'  💰💰💰 Stage 3: {final_size} closed, SL locked at +2R, {final_remaining} trailing')
 
         # ═══════════════════════════════════════════════════════
-        # Progressive SL: تأمين ربح تدريجي للباقي (بعد Stage 2)
+        # 4. Progressive Lock للباقي
         # ═══════════════════════════════════════════════════════
         elif s2:
-            new_locked_r, reason = get_progressive_lock(profit_r)
+            new_locked_r, _ = get_progressive_lock(profit_r)
             if new_locked_r > pos['final_locked_r']:
                 new_sl = calculate_sl_at_r(pos, new_locked_r)
                 if new_sl and should_move_sl(pos['sl'], new_sl, dir_) and update_sl_api(deal_id, new_sl, tp):
                     op_update(deal_id, final_locked_r=new_locked_r, sl=new_sl)
-                    
-                    nl = '\n'
-                    tg(f'📈 *Progressive Lock — {pos["pair"]} {dir_}*{nl}'
-                       f'ربح مضمون ↑ `{pos["final_locked_r"]}R` → `{new_locked_r}R`{nl}'
-                       f'السعر: `+{profit_r:.2f}R` | SL: `{new_sl}`{nl}'
-                       f'_{utc_now()}_')
-                    log(f'  📈 Progressive: locked {new_locked_r}R (was {pos["final_locked_r"]}R)')
+                    tg(f'📈 Progressive: locked {new_locked_r}R')
 
         # ═══════════════════════════════════════════════════════
-        # Trailing للباقي النهائي (بعد Stage 3)
+        # 5. Trailing للباقي النهائي (بعد Stage 3 أو 2.5R+)
         # ═══════════════════════════════════════════════════════
-        elif s3:
-            # Trailing بسيط: SL = السعر الحالي - 2×ATR
-            atr = calc_atr_for_trailing(pos['pair'])
-            if atr:
-                trail_sl = calculate_trailing_sl(pos, cur_price, atr)
-                if trail_sl and should_move_sl(pos['sl'], trail_sl, dir_) and update_sl_api(deal_id, trail_sl, tp):
-                    op_update(deal_id, sl=trail_sl)
-                    log(f'  📉 Trailing: SL moved to {trail_sl}')
-
-
-def calculate_sl_at_r(pos, locked_r):
-    """احسب SL عند locked_r من الربح"""
-    entry, dir_, sl_dist = pos['entry'], pos['direction'], abs(pos['entry'] - pos['sl'])
-    if dir_ == 'BUY': return round(entry + (locked_r * sl_dist), 5)
-    else: return round(entry - (locked_r * sl_dist), 5)
-
-def get_progressive_lock(profit_r):
-    """احدد مستوى الربح المضمون حسب الربح الحالي"""
-    for threshold, locked in sorted(PROGRESSIVE_LOCK.items(), reverse=True):
-        if profit_r >= threshold: return locked, f'@ {threshold}R profit'
-    return 0, 'none'
-
-def should_move_sl(current_sl, new_sl, direction):
-    """تحقق إذا كان SL الجديد أفضل"""
-    if direction == 'BUY': return new_sl > current_sl + 0.00001
-    else: return new_sl < current_sl - 0.00001
-
-def calc_atr_for_trailing(pair):
-    """احسب ATR الحالي للـ Trailing"""
-    df = fetch_candles(PAIRS[pair]['epic'], STRATEGY_TF, 50)
-    if df.empty: return None
-    return float(calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1])
-
-def calculate_trailing_sl(pos, cur_price, atr):
-    """احسب SL trailing: السعر - 2×ATR"""
-    dir_ = pos['direction']
-    if dir_ == 'BUY': return round(cur_price - (TRAILING_ATR_MULT * atr), 5)
-    else: return round(cur_price + (TRAILING_ATR_MULT * atr), 5)
+        elif (s3 or profit_r >= TRAILING_START_R) and profit_r > pos.get('last_trail_r', 0) + 0.5:
+            # تحديث Trailing كل 0.5R جديدة
+            df = fetch_candles(PAIRS[pos['pair']]['epic'], STRATEGY_TF, 50)
+            if not df.empty:
+                atr = float(calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1])
+                if atr > 0:
+                    trail_sl = calculate_trailing_sl(pos, cur_price, atr)
+                    if should_move_sl(pos['sl'], trail_sl, dir_) and update_sl_api(deal_id, trail_sl, tp):
+                        op_update(deal_id, sl=trail_sl, last_trail_r=profit_r)
+                        log(f'  🏃 Trailing: SL → {trail_sl}')
 
 
 # ═══════════════════════════════════════════════════════
-# SIGNAL DETECTION — v3.0: منطق معكوس
+# SIGNAL DETECTION
 # ═══════════════════════════════════════════════════════
-def check_signal(pair_name, config):
+def check_signal(pair_name, config, session_mult, risk_mult):
     epic, allow_buy, allow_sell = config['epic'], config['allow_buy'], config['allow_sell']
     if not allow_buy and not allow_sell: return None
 
+    # ✅ فلتر التقلب
+    vol_regime, vol_mult = check_volatility_regime(epic)
+    if vol_regime == 'EXTREME':
+        log(f'  {pair_name}: ⛔ تقلب مفرط - توقف')
+        return None
+    
+    final_risk_mult = session_mult * vol_mult * risk_mult
+    if final_risk_mult < 0.3:
+        log(f'  {pair_name}: ⏸ مخاطرة منخفضة جداً ({final_risk_mult:.1%})')
+        return None
+
     df = fetch_candles(epic, STRATEGY_TF, CANDLES_COUNT)
-    if df.empty or len(df) < max(LENGTH * 3 + ATR_PERIOD, 200): 
+    if df.empty or len(df) < max(LENGTH * 3 + ATR_PERIOD, 200):
         log(f'  {pair_name}: بيانات غير كافية'); return None
 
     df_c = df.iloc[:-1].copy().reset_index(drop=True)
@@ -614,7 +856,7 @@ def check_signal(pair_name, config):
     cr = float(rsi_s.iloc[li])
 
     bid, ask, sp, cs, min_sz, max_sz = get_instrument_meta(epic)
-    if bid <= 0 or sp > la * SPREAD_ATR_MAX: 
+    if bid <= 0 or sp > la * SPREAD_ATR_MAX:
         log(f'  {pair_name}: Spread عالٍ'); return None
 
     signal, entry = None, None
@@ -626,10 +868,10 @@ def check_signal(pair_name, config):
             u_last, u_prev = tl_value(ai, av, sv, False, li), tl_value(ai, av, sv, False, li - 1)
             pc = float(df_c['close'].iloc[li - 1])
             if lc > u_last and pc > u_prev:
-                filters = [csd == -1, cef < ces, cet < cem < cesl, cr > 55, cr < 78]
+                filters = [csd == -1, cef < ces, cet < cem < cesl, RSI_SELL_MIN < cr < RSI_SELL_MAX]
                 if all(filters):
                     signal, entry = 'SELL', bid
-                    log(f'  {pair_name}: 🔴 SELL @ قمة | RSI={cr:.1f}')
+                    log(f'  {pair_name}: 🔴 SELL @ قمة | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
 
     # ✅ BUY: كسر ترند سفلي (قاع)
     if allow_buy and not signal and lower_tl:
@@ -638,10 +880,10 @@ def check_signal(pair_name, config):
             l_last, l_prev = tl_value(ai, av, sv, True, li), tl_value(ai, av, sv, True, li - 1)
             pc = float(df_c['close'].iloc[li - 1])
             if lc < l_last and pc < l_prev:
-                filters = [csd == 1, cef > ces, cet > cem > cesl, cr > 22, cr < 45]
+                filters = [csd == 1, cef > ces, cet > cem > cesl, RSI_BUY_MIN < cr < RSI_BUY_MAX]
                 if all(filters):
                     signal, entry = 'BUY', ask
-                    log(f'  {pair_name}: 🟢 BUY @ قاع | RSI={cr:.1f}')
+                    log(f'  {pair_name}: 🟢 BUY @ قاع | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
 
     if not signal: return None
 
@@ -653,16 +895,22 @@ def check_signal(pair_name, config):
     sld = abs(entry - sl)
     if sld < la * 0.1: return None
 
+    # ✅ حساب الحجم بالمخاطرة الديناميكية
+    dynamic_risk, risk_reason = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
+    final_risk = dynamic_risk * final_risk_mult
+    
     sz = config.get('size_override')
-    if sz: size = max(min(float(sz), max_sz), min_sz)
+    if sz:
+        size = max(min(float(sz), max_sz), min_sz)
     else:
-        risk = ACCOUNT_BALANCE * RISK_PERCENT
-        size = max(min(round(risk / (sld * cs), 2), max_sz), min_sz)
+        risk_usd = get_current_balance() * final_risk
+        size = max(min(round(risk_usd / (sld * cs), 2), max_sz), min_sz)
 
     return {
         'pair': pair_name, 'epic': epic, 'direction': signal, 'entry': round(entry, 5),
         'sl': sl, 'tp': tp, 'atr': round(la, 5), 'size': size, 'spread': round(sp, 5),
-        'filters_info': {'rsi': cr, 'st_dir': csd, 'ema_cross': cef > ces if signal == 'BUY' else cef < ces}
+        'risk_percent': final_risk, 'risk_reason': risk_reason,
+        'filters_info': {'rsi': cr, 'st_dir': csd, 'vol_regime': vol_regime}
     }
 
 
@@ -672,10 +920,11 @@ def check_signal(pair_name, config):
 def execute_order(sig):
     body = {'epic': sig['epic'], 'direction': sig['direction'], 'size': sig['size'],
             'guaranteedStop': False, 'trailingStop': False, 'stopLevel': sig['sl'], 'profitLevel': sig['tp']}
-    log(f'  📤 {sig["pair"]} {sig["direction"]} | entry≈{sig["entry"]} SL={sig["sl"]} TP={sig["tp"]}')
+    log(f'  📤 {sig["pair"]} {sig["direction"]} | entry≈{sig["entry"]} SL={sig["sl"]} TP={sig["tp"]} Risk={sig["risk_percent"]:.2%}')
     
     r = _post('/api/v1/positions', body)
-    if not r: tg_result(sig['pair'], sig['direction'], 'ERROR', 'N/A', 'no response'); return 'ERROR', 'no response'
+    if not r:
+        tg(f'❌ {sig["pair"]} {sig["direction"]}: no response'); return 'ERROR', 'no response'
     
     data = r.json()
     if r.status_code == 200:
@@ -685,49 +934,59 @@ def execute_order(sig):
         if rc and rc.status_code == 200:
             c = rc.json()
             status, deal_id = c.get('dealStatus', 'UNKNOWN'), c.get('dealId', ref)
-            tg_result(sig['pair'], sig['direction'], status, ref, c.get('reason', ''))
             if status in ('ACCEPTED', 'SUCCESS'):
                 db_key = f'{sig["pair"]}_{datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")}'
                 op_save(deal_id, sig['pair'], sig['direction'], sig['entry'], sig['sl'], sig['tp'], sig['atr'], sig['size'], db_key)
             return status, ref
         return 'UNKNOWN', ref
-    tg_result(sig['pair'], sig['direction'], 'FAILED', 'N/A', data.get('errorCode', str(data)[:80]))
     return 'FAILED', data.get('errorCode')
-
-def tg_result(pair, direction, status, ref, error=''):
-    icon, nl = ('✅' if status in ('ACCEPTED', 'SUCCESS') else '❌'), '\n'
-    tg(f'{icon} *{pair} {direction} {status}*{nl}Ref: `{ref}`' + (f'{nl}Err: `{error[:80]}`' if error else ''))
 
 def run_scan():
     now = datetime.now(timezone.utc)
-    if now.weekday() >= 5 or not (SESSION_START <= now.hour < SESSION_END):
-        log(f'⏸ خارج الجلسة/عطلة'); return
+    
+    # ✅ Smart Session & Drawdown Check
+    can_trade, reason, session_mult, session_name, day_pnl = should_trade()
+    if not can_trade:
+        log(f'⏸ {reason}')
+        if 'LIMIT' in reason or 'TARGET' in reason:
+            tg(f'🛑 {reason}')
+        return
 
     log('─' * 60)
-    log(f'🔍 Scan v3.1 | Partial TP متدرج + Progressive SL | {"DEMO" if DEMO_MODE else "LIVE"}')
+    log(f'🔍 Scan v3.2 | {session_name} | RiskMult:{session_mult:.1f}x | DayPnL:{day_pnl/ACCOUNT_BALANCE:+.1%}')
     log('─' * 60)
 
-    get_balance()
-    manage_open_positions()
+    get_current_balance()
+    manage_smart_exits()
 
     open_pos = get_open_positions()
     log(f'  مفتوحة: {len(open_pos)} / {MAX_OPEN_TRADES}')
-    if len(open_pos) >= MAX_OPEN_TRADES: log('  ⏸ الحد الأقصى'); return
+    if len(open_pos) >= MAX_OPEN_TRADES:
+        log('  ⏸ الحد الأقصى'); return
 
     ts_key = now.strftime('%Y-%m-%d_%H%M')
+    
     for pair_name, config in PAIRS.items():
         if len(open_pos) >= MAX_OPEN_TRADES: break
-        if db_consec_losses(pair_name) >= MAX_CONSECUTIVE_LOSS: 
-            log(f'  {pair_name}: تخطّي بسبب خسائر'); continue
+        
+        # ✅ Dynamic Risk لكل زوج
+        risk_pct, risk_reason = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
+        log(f'  {pair_name}: Risk={risk_pct:.2%} ({risk_reason})')
+        
+        if db_consec_losses(pair_name) >= MAX_CONSECUTIVE_LOSS:
+            log(f'  {pair_name}: تخطّي بسبب خسائر متتالية'); continue
+        
         key = f'{pair_name}_{ts_key}'
         if db_is_dup(key): log(f'  {pair_name}: مكرر'); continue
         
         log(f'  {pair_name}: فحص...')
-        sig = check_signal(pair_name, config)
+        sig = check_signal(pair_name, config, session_mult, risk_pct / BASE_RISK_PERCENT)
         if not sig: log(f'  {pair_name}: لا إشارة'); continue
         
-        db_save(key, pair_name, sig['direction'], sig['entry'], sig['sl'], sig['tp'], sig['atr'], sig['size'], sig['spread'])
-        tg_signal(sig, sig['filters_info'])
+        db_save(key, pair_name, sig['direction'], sig['entry'], sig['sl'], sig['tp'], 
+                sig['atr'], sig['size'], sig['spread'], sig['risk_percent'], session_name)
+        tg_signal(sig, sig['filters_info'], (sig['risk_percent'], sig['risk_reason']), session_name)
+        
         status, ref = execute_order(sig)
         db_update(key, status)
         log(f'  {pair_name}: {status} | {ref}')
@@ -751,22 +1010,21 @@ def db_consec_losses(pair):
 def start_bot():
     db_init()
     csv_init()
-    mode, nl = ('DEMO' if DEMO_MODE else 'LIVE'), '\n'
+    mode = 'DEMO' if DEMO_MODE else 'LIVE'
 
-    print('=' * 60, flush=True)
-    print(f'  Multi-Pairs Bot v3.1 — Partial TP متدرج + Progressive SL', flush=True)
-    print(f'  🟢 BUY: قاع | 🔴 SELL: قمة (منطق معكوس v3.0)', flush=True)
-    print(f'  💰 Stage 1: {STAGE1_TP_R}R → {int(STAGE1_PCT*100)}% | Stage 2: {STAGE2_TP_R}R → {int(STAGE2_PCT*100)}% | Stage 3: {FINAL_TP_R}R → {int(FINAL_PCT*100)}%', flush=True)
-    print(f'  📈 Progressive: 2R→0.5R | 2.5R→1R | 3R→1.5R | 3.5R→2R | 4.5R→3R | 6R→4R', flush=True)
-    print(f'  🏃 Trailing: الباقي النهائي مع ATR×{TRAILING_ATR_MULT}', flush=True)
-    print('=' * 60, flush=True)
+    print('=' * 70, flush=True)
+    print(f'  Multi-Pairs Bot v3.2 — Smart Risk + Session + Exits', flush=True)
+    print(f'  ✅ Dynamic Risk: Kelly {KELLY_FRACTION:.0%} | DailyMax {MAX_DAILY_RISK:.0%} | WeeklyMax {MAX_WEEKLY_RISK:.0%}', flush=True)
+    print(f'  ✅ Smart Session: London/NY 1.5x | Asia 0.5x | Quiet 0.3x', flush=True)
+    print(f'  ✅ Smart Exits: Time({MAX_TRADE_DURATION_BARS}bars) | Early({EARLY_EXIT_THRESHOLD}R) | Trail({TRAILING_START_R}R)', flush=True)
+    print(f'  💰 Partial: 1.5R→50% | 2.5R→30%+0.5R lock | 3.5R→50%+2R lock', flush=True)
+    print('=' * 70, flush=True)
 
-    tg(f'🚀 *Bot v3.1* [{mode}]{nl}'
-       f'💰 Stage 1: `{STAGE1_TP_R}R→{int(STAGE1_PCT*100)}%`{nl}'
-       f'💰💰 Stage 2: `{STAGE2_TP_R}R→{int(STAGE2_PCT*100)}%` + Lock `0.5R`{nl}'
-       f'💰💰💰 Stage 3: `{FINAL_TP_R}R→{int(FINAL_PCT*100)}%` + Lock `2R`{nl}'
-       f'🏃 Trailing: الباقي مع ATR×{TRAILING_ATR_MULT}{nl}'
-       f'📈 Progressive: `2R→0.5R` → `2.5R→1R` → `3R→1.5R`...{nl}'
+    nl = '\n'
+    tg(f'🚀 *Bot v3.2* [{mode}]{nl}'
+       f'📊 Dynamic Risk: Kelly `{KELLY_FRACTION:.0%}` | Daily `{MAX_DAILY_RISK:.0%}`{nl}'
+       f'⏰ Smart Session: London/NY `1.5x`{nl}'
+       f'🚪 Smart Exits: Time `{MAX_TRADE_DURATION_BARS}` | Early `{EARLY_EXIT_THRESHOLD}R`{nl}'
        f'_{utc_now()}_')
 
     session_age = 0
