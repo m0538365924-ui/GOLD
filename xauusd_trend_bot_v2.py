@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
 # multi_pairs_bot.py — TL Breaks Bot (v3.2-fixed)
-# ✅ Fixed: pd import error
 # ✅ Fixed: Database schema with pnl_r column
 # ✅ Dynamic Risk (Kelly + Drawdown)
 # ✅ Smart Session Filter
@@ -10,7 +9,7 @@
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
-import pandas as pd  # ✅ FIXED: was "import pandas as np"
+import pandas as np
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -900,3 +899,265 @@ def manage_smart_exits():
             final_size = round(remaining * FINAL_PCT, 2)
             _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
             if final_size >= min_sz and close_partial_api(deal_id, final_size):
+                new_sl = calculate_sl_at_r(pos, 2.0)
+                if new_sl and update_sl_api(deal_id, new_sl, tp):
+                    op_update(deal_id, stage3_done=1, final_locked_r=2.0, sl=new_sl)
+
+        # ═══════════════════════════════════════════════════════
+        # 4. Progressive Lock للباقي
+        # ═══════════════════════════════════════════════════════
+        elif s2:
+            new_locked_r, _ = get_progressive_lock(profit_r)
+            if new_locked_r > pos['final_locked_r']:
+                new_sl = calculate_sl_at_r(pos, new_locked_r)
+                if new_sl and should_move_sl(pos['sl'], new_sl, dir_) and update_sl_api(deal_id, new_sl, tp):
+                    op_update(deal_id, final_locked_r=new_locked_r, sl=new_sl)
+                    tg(f'📈 Progressive: locked {new_locked_r}R')
+
+        # ═══════════════════════════════════════════════════════
+        # 5. Trailing للباقي النهائي
+        # ═══════════════════════════════════════════════════════
+        elif (s3 or profit_r >= TRAILING_START_R) and profit_r > pos.get('last_trail_r', 0) + 0.5:
+            df = fetch_candles(PAIRS[pos['pair']]['epic'], STRATEGY_TF, 50)
+            if not df.empty:
+                atr = float(calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1])
+                if atr > 0:
+                    trail_sl = calculate_trailing_sl(pos, cur_price, atr)
+                    if should_move_sl(pos['sl'], trail_sl, dir_) and update_sl_api(deal_id, trail_sl, tp):
+                        op_update(deal_id, sl=trail_sl, last_trail_r=profit_r)
+                        log(f'  🏃 Trailing: SL → {trail_sl}')
+
+
+# ═══════════════════════════════════════════════════════
+# SIGNAL DETECTION
+# ═══════════════════════════════════════════════════════
+def check_signal(pair_name, config, session_mult, risk_mult):
+    epic, allow_buy, allow_sell = config['epic'], config['allow_buy'], config['allow_sell']
+    if not allow_buy and not allow_sell: return None
+
+    # ✅ فلتر التقلب
+    vol_regime, vol_mult = check_volatility_regime(epic)
+    if vol_regime == 'EXTREME':
+        log(f'  {pair_name}: ⛔ تقلب مفرط - توقف')
+        return None
+    
+    final_risk_mult = session_mult * vol_mult * risk_mult
+    if final_risk_mult < 0.3:
+        log(f'  {pair_name}: ⏸ مخاطرة منخفضة جداً ({final_risk_mult:.1%})')
+        return None
+
+    df = fetch_candles(epic, STRATEGY_TF, CANDLES_COUNT)
+    if df.empty or len(df) < max(LENGTH * 3 + ATR_PERIOD, 200):
+        log(f'  {pair_name}: بيانات غير كافية'); return None
+
+    df_c = df.iloc[:-1].copy().reset_index(drop=True)
+    n = len(df_c)
+
+    atr_s = calc_atr_series(df_c, ATR_PERIOD)
+    ph_arr, pl_arr = find_pivot_high(df_c['high'], LENGTH), find_pivot_low(df_c['low'], LENGTH)
+    st_line, st_dir = calc_supertrend(df_c, 10, 3.0)
+    ema_f, ema_s = calc_ema(df_c['close'], 20), calc_ema(df_c['close'], 50)
+    ema_tf, ema_tm, ema_ts = calc_ema(df_c['close'], 20), calc_ema(df_c['close'], 50), calc_ema(df_c['close'], 200)
+    rsi_s = calc_rsi(df_c['close'], 14)
+
+    upper_tl = lower_tl = None
+    for i in range(LENGTH + ATR_PERIOD, n):
+        atr_i = float(atr_s.iloc[i])
+        if np.isnan(atr_i) or atr_i <= 0: continue
+        if not np.isnan(ph_arr[i]): upper_tl = (i, float(ph_arr[i]), get_slope_val(SLOPE_METHOD, df_c, i, LENGTH, SLOPE_MULT, atr_s))
+        if not np.isnan(pl_arr[i]): lower_tl = (i, float(pl_arr[i]), get_slope_val(SLOPE_METHOD, df_c, i, LENGTH, SLOPE_MULT, atr_s))
+
+    li, lc, la = n - 1, float(df_c['close'].iloc[-1]), float(atr_s.iloc[-1])
+    if np.isnan(la) or la <= 0: return None
+
+    csd, cef, ces = int(st_dir.iloc[li]), float(ema_f.iloc[li]), float(ema_s.iloc[li])
+    cet, cem, cesl = float(ema_tf.iloc[li]), float(ema_tm.iloc[li]), float(ema_ts.iloc[li])
+    cr = float(rsi_s.iloc[li])
+
+    bid, ask, sp, cs, min_sz, max_sz = get_instrument_meta(epic)
+    if bid <= 0 or sp > la * SPREAD_ATR_MAX:
+        log(f'  {pair_name}: Spread عالٍ'); return None
+
+    signal, entry = None, None
+
+    # ✅ SELL: كسر ترند علوي (ذروة)
+    if allow_sell and upper_tl:
+        ai, av, sv = upper_tl
+        if ai < li - 1:
+            u_last, u_prev = tl_value(ai, av, sv, False, li), tl_value(ai, av, sv, False, li - 1)
+            pc = float(df_c['close'].iloc[li - 1])
+            if lc > u_last and pc > u_prev:
+                filters = [csd == -1, cef < ces, cet < cem < cesl, RSI_SELL_MIN < cr < RSI_SELL_MAX]
+                if all(filters):
+                    signal, entry = 'SELL', bid
+                    log(f'  {pair_name}: 🔴 SELL @ قمة | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
+
+    # ✅ BUY: كسر ترند سفلي (قاع)
+    if allow_buy and not signal and lower_tl:
+        ai, av, sv = lower_tl
+        if ai < li - 1:
+            l_last, l_prev = tl_value(ai, av, sv, True, li), tl_value(ai, av, sv, True, li - 1)
+            pc = float(df_c['close'].iloc[li - 1])
+            if lc < l_last and pc < l_prev:
+                filters = [csd == 1, cef > ces, cet > cem > cesl, RSI_BUY_MIN < cr < RSI_BUY_MAX]
+                if all(filters):
+                    signal, entry = 'BUY', ask
+                    log(f'  {pair_name}: 🟢 BUY @ قاع | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
+
+    if not signal: return None
+
+    if signal == 'SELL':
+        sl, tp = round(entry + SL_ATR_MULT * la + sp, 5), round(entry - TP_ATR_MULT * la, 5)
+    else:
+        sl, tp = round(entry - SL_ATR_MULT * la - sp, 5), round(entry + TP_ATR_MULT * la, 5)
+
+    sld = abs(entry - sl)
+    if sld < la * 0.1: return None
+
+    # ✅ حساب الحجم بالمخاطرة الديناميكية
+    dynamic_risk, risk_reason = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
+    final_risk = dynamic_risk * final_risk_mult
+    
+    sz = config.get('size_override')
+    if sz:
+        size = max(min(float(sz), max_sz), min_sz)
+    else:
+        risk_usd = get_current_balance() * final_risk
+        size = max(min(round(risk_usd / (sld * cs), 2), max_sz), min_sz)
+
+    return {
+        'pair': pair_name, 'epic': epic, 'direction': signal, 'entry': round(entry, 5),
+        'sl': sl, 'tp': tp, 'atr': round(la, 5), 'size': size, 'spread': round(sp, 5),
+        'risk_percent': final_risk, 'risk_reason': risk_reason,
+        'filters_info': {'rsi': cr, 'st_dir': csd, 'vol_regime': vol_regime}
+    }
+
+
+# ═══════════════════════════════════════════════════════
+# EXECUTE & SCAN
+# ═══════════════════════════════════════════════════════
+def execute_order(sig):
+    body = {'epic': sig['epic'], 'direction': sig['direction'], 'size': sig['size'],
+            'guaranteedStop': False, 'trailingStop': False, 'stopLevel': sig['sl'], 'profitLevel': sig['tp']}
+    log(f'  📤 {sig["pair"]} {sig["direction"]} | entry≈{sig["entry"]} SL={sig["sl"]} TP={sig["tp"]} Risk={sig["risk_percent"]:.2%}')
+    
+    r = _post('/api/v1/positions', body)
+    if not r:
+        tg(f'❌ {sig["pair"]} {sig["direction"]}: no response'); return 'ERROR', 'no response'
+    
+    data = r.json()
+    if r.status_code == 200:
+        ref = data.get('dealReference', 'N/A')
+        time.sleep(2)
+        rc = _get(f'/api/v1/confirms/{ref}')
+        if rc and rc.status_code == 200:
+            c = rc.json()
+            status, deal_id = c.get('dealStatus', 'UNKNOWN'), c.get('dealId', ref)
+            if status in ('ACCEPTED', 'SUCCESS'):
+                db_key = f'{sig["pair"]}_{datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")}'
+                op_save(deal_id, sig['pair'], sig['direction'], sig['entry'], sig['sl'], sig['tp'], sig['atr'], sig['size'], db_key)
+            return status, ref
+        return 'UNKNOWN', ref
+    return 'FAILED', data.get('errorCode')
+
+def run_scan():
+    now = datetime.now(timezone.utc)
+    
+    # ✅ Smart Session & Drawdown Check
+    can_trade, reason, session_mult, session_name, day_pnl = should_trade()
+    if not can_trade:
+        log(f'⏸ {reason}')
+        if 'LIMIT' in reason or 'TARGET' in reason:
+            tg(f'🛑 {reason}')
+        return
+
+    log('─' * 60)
+    log(f'🔍 Scan v3.2-fixed | {session_name} | RiskMult:{session_mult:.1f}x | DayPnL:{day_pnl/ACCOUNT_BALANCE:+.1%}')
+    log('─' * 60)
+
+    get_current_balance()
+    manage_smart_exits()
+
+    open_pos = get_open_positions()
+    log(f'  مفتوحة: {len(open_pos)} / {MAX_OPEN_TRADES}')
+    if len(open_pos) >= MAX_OPEN_TRADES:
+        log('  ⏸ الحد الأقصى'); return
+
+    ts_key = now.strftime('%Y-%m-%d_%H%M')
+    
+    for pair_name, config in PAIRS.items():
+        if len(open_pos) >= MAX_OPEN_TRADES: break
+        
+        # ✅ Dynamic Risk لكل زوج
+        risk_pct, risk_reason = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
+        log(f'  {pair_name}: Risk={risk_pct:.2%} ({risk_reason})')
+        
+        if db_consec_losses(pair_name) >= MAX_CONSECUTIVE_LOSS:
+            log(f'  {pair_name}: تخطّي بسبب خسائر متتالية'); continue
+        
+        key = f'{pair_name}_{ts_key}'
+        if db_is_dup(key): log(f'  {pair_name}: مكرر'); continue
+        
+        log(f'  {pair_name}: فحص...')
+        sig = check_signal(pair_name, config, session_mult, risk_pct / BASE_RISK_PERCENT)
+        if not sig: log(f'  {pair_name}: لا إشارة'); continue
+        
+        db_save(key, pair_name, sig['direction'], sig['entry'], sig['sl'], sig['tp'], 
+                sig['atr'], sig['size'], sig['spread'], sig['risk_percent'], session_name)
+        tg_signal(sig, sig['filters_info'], (sig['risk_percent'], sig['risk_reason']), session_name)
+        
+        status, ref = execute_order(sig)
+        db_update(key, status)
+        log(f'  {pair_name}: {status} | {ref}')
+        open_pos = get_open_positions()
+        time.sleep(2)
+
+def db_consec_losses(pair):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            rows = conn.execute("SELECT status FROM trades WHERE pair=? AND status IN ('WIN','LOSS') ORDER BY id DESC LIMIT 8", (pair,)).fetchall()
+            c = 0
+            for r in rows:
+                if r[0] == 'LOSS': c += 1
+                else: break
+            return c
+
+
+# ═══════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════
+def start_bot():
+    db_init()
+    csv_init()
+    mode = 'DEMO' if DEMO_MODE else 'LIVE'
+
+    print('=' * 70, flush=True)
+    print(f'  Multi-Pairs Bot v3.2-fixed — Database + Smart Features', flush=True)
+    print(f'  ✅ Fixed: pnl_r column with auto-migration', flush=True)
+    print(f'  ✅ Dynamic Risk: Kelly {KELLY_FRACTION:.0%} | DailyMax {MAX_DAILY_RISK:.0%}', flush=True)
+    print(f'  ✅ Smart Session: London/NY 1.5x | Asia 0.5x | Quiet 0.3x', flush=True)
+    print(f'  ✅ Smart Exits: Time({MAX_TRADE_DURATION_BARS}bars) | Early({EARLY_EXIT_THRESHOLD}R)', flush=True)
+    print('=' * 70, flush=True)
+
+    nl = '\n'
+    tg(f'🚀 *Bot v3.2-fixed* [{mode}]{nl}'
+       f'✅ Database: auto-migration enabled{nl}'
+       f'📊 Dynamic Risk: Kelly `{KELLY_FRACTION:.0%}` | Daily `{MAX_DAILY_RISK:.0%}`{nl}'
+       f'⏰ Smart Session: London/NY `1.5x`{nl}'
+       f'🚪 Smart Exits: Time `{MAX_TRADE_DURATION_BARS}` | Early `{EARLY_EXIT_THRESHOLD}R`{nl}'
+       f'_{utc_now()}_')
+
+    session_age = 0
+    while True:
+        try:
+            if session_age == 0:
+                if not create_session(): time.sleep(60); continue
+            else: ping_session()
+            session_age = (session_age + 1) % 15
+            run_scan()
+        except KeyboardInterrupt: log('🛑 Bot stopped'); tg('🛑 Bot stopped'); break
+        except Exception as ex: log(f'LOOP ERROR: {ex}'); tg(f'❌ Error: `{str(ex)[:100]}`')
+        time.sleep(SCAN_INTERVAL)
+
+if __name__ == '__main__':
+    start_bot()
