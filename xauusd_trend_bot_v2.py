@@ -1299,7 +1299,7 @@ if __name__ == '__main__':
     main_loop()    'GBPUSD': {'epic': 'GBPUSD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
     'US100': {'epic': 'US100', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
     'US500': {'epic': 'US500', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
-
+}
 
 STRATEGY_TF   = os.getenv('STRATEGY_TF', 'MINUTE_15')
 CANDLES_COUNT = 500
