@@ -98,8 +98,8 @@ FINAL_TP_R, FINAL_PCT = 3.5, 0.50
 
 PROGRESSIVE_LOCK = {2.0: 0.5, 2.5: 1.0, 3.0: 1.5, 3.5: 2.0, 4.5: 3.0, 6.0: 4.0}
 
-RSI_SELL_MIN, RSI_SELL_MAX = 55, 78
-RSI_BUY_MIN, RSI_BUY_MAX = 22, 45
+RSI_SELL_MIN, RSI_SELL_MAX = 40, 70
+RSI_BUY_MIN, RSI_BUY_MAX = 30, 60
 
 SPREAD_ATR_MAX = 0.25
 
@@ -1127,7 +1127,6 @@ def check_signal(pair_name, config, session_mult, risk_mult):
                 filters = [
                     csd == -1,
                     cef < ces,
-                    cet < cem < cesl,
                     RSI_SELL_MIN < cr < RSI_SELL_MAX
                 ]
                 if all(filters):
@@ -1148,7 +1147,6 @@ def check_signal(pair_name, config, session_mult, risk_mult):
                 filters = [
                     csd == 1,
                     cef > ces,
-                    cet > cem > cesl,
                     RSI_BUY_MIN < cr < RSI_BUY_MAX
                 ]
                 if all(filters):
