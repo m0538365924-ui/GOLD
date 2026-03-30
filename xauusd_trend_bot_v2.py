@@ -1126,8 +1126,7 @@ def check_signal(pair_name, config, session_mult, risk_mult):
     ]
     if all(filters):
         signal, entry = 'BUY', ask
-                    log(f'  {pair_name}: 🟢 BUY @ قاع | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
-
+                   
     if not signal: return None
 
     # ═══════════════════════════════════════════════════════
