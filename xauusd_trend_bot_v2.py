@@ -767,37 +767,6 @@ def tl_value(ai, av, s, up, ci):
 
 # ═══════════════════════════════════════════════════════
 # ✅ ENHANCEMENT A1: HTF Confirmation
-# ═══════════════════════════════════════════════════════
-def check_htf_confirmation(epic, direction):
-    """
-    ✅ ENHANCEMENT A1: تأكيد HTF (H1)
-    تحقق أن الإشارة متوافقة مع اتجاه H1
-    """
-    if not REQUIRE_HTF_CONFIRMATION:
-        return True, 'HTF disabled'
-    
-    df_h = fetch_candles(epic, HTF, 100)
-    if df_h.empty or len(df_h) < 50:
-        log(f'    ⚠️ HTF data insufficient')
-        return True, 'HTF insufficient (allow)'
-    
-    df_h = df_h.iloc[:-1].copy().reset_index(drop=True)
-    
-    ema_f = calc_ema(df_h['close'], HTF_EMA_FAST)
-    ema_s = calc_ema(df_h['close'], HTF_EMA_SLOW)
-    ema_t = calc_ema(df_h['close'], HTF_EMA_TREND)
-    
-    last_f, last_s, last_t = ema_f.iloc[-1], ema_s.iloc[-1], ema_t.iloc[-1]
-    
-    # ✅ تحقق التوافق
-    if direction == 'BUY':
-        # يجب أن يكون الاتجاه صعودي في H1
-        is_match = (last_f > last_s > last_t)
-        return is_match, f'HTF trend: {"UP ✅" if is_match else "DOWN ❌"}'
-    else:  # SELL
-        # يجب أن يكون الاتجاه هبوطي في H1
-        is_match = (last_f < last_s < last_t)
-        return is_match, f'HTF trend: {"DOWN ✅" if is_match else "UP ❌"}'
 
 
 # ═══════════════════════════════════════════════════════
