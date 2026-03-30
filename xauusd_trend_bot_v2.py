@@ -1107,7 +1107,7 @@ def check_signal(pair_name, config, session_mult, risk_mult):
     ]
     if all(filters):
         signal, entry = 'SELL', bid
-                    log(f'  {pair_name}: 🔴 SELL @ قمة  | RiskMult={final_risk_mult:.2f}')
+                    
 
     # ═══════════════════════════════════════════════════════
     # BUY: Lower TL Break
