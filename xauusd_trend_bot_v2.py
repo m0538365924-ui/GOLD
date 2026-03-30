@@ -98,8 +98,8 @@ FINAL_TP_R, FINAL_PCT = 3.5, 0.50
 
 PROGRESSIVE_LOCK = {2.0: 0.5, 2.5: 1.0, 3.0: 1.5, 3.5: 2.0, 4.5: 3.0, 6.0: 4.0}
 
-RSI_SELL_MIN, RSI_SELL_MAX = 40, 70
-RSI_BUY_MIN, RSI_BUY_MAX = 30, 60
+RSI_SELL_MIN, RSI_SELL_MAX = 55, 78
+RSI_BUY_MIN, RSI_BUY_MAX = 22, 45
 
 SPREAD_ATR_MAX = 0.25
 
@@ -790,19 +790,42 @@ def check_htf_confirmation(epic, direction):
     last_f, last_s, last_t = ema_f.iloc[-1], ema_s.iloc[-1], ema_t.iloc[-1]
     
     # ✅ تحقق التوافق
-    #if direction == 'BUY':
+    if direction == 'BUY':
         # يجب أن يكون الاتجاه صعودي في H1
-       # is_match = (last_f > last_s > last_t)
-       # return is_match, f'HTF trend: {"UP ✅" if is_match else "DOWN ❌"}'
-   # else:  # SELL
+        is_match = (last_f > last_s > last_t)
+        return is_match, f'HTF trend: {"UP ✅" if is_match else "DOWN ❌"}'
+    else:  # SELL
         # يجب أن يكون الاتجاه هبوطي في H1
-      #  is_match = (last_f < last_s < last_t)
-       # return is_match, f'HTF trend: {"DOWN ✅" if is_match else "UP ❌"}'
+        is_match = (last_f < last_s < last_t)
+        return is_match, f'HTF trend: {"DOWN ✅" if is_match else "UP ❌"}'
 
 
 # ═══════════════════════════════════════════════════════
 # ✅ ENHANCEMENT A2: Volume Confirmation
 # ═══════════════════════════════════════════════════════
+def check_volume_confirmation(df):
+    """
+    ✅ ENHANCEMENT A2: تأكيد حجم الكسر
+    تحقق أن حجم الكسر أعلى من المتوسط
+    """
+    if not VOLUME_CONFIRMATION or df.empty or len(df) < VOLUME_MA_PERIOD:
+        return True, 'Volume check disabled'
+    
+    vol = df['volume']
+    if vol.sum() == 0:  # بدون بيانات حجم
+        return True, 'No volume data'
+    
+    vol_ma = vol.tail(VOLUME_MA_PERIOD).mean()
+    current_vol = vol.iloc[-1]
+    
+    if vol_ma == 0:
+        return True, 'No volume MA'
+    
+    vol_ratio = current_vol / vol_ma
+    is_strong = vol_ratio >= VOLUME_MULT_MIN
+    
+    return is_strong, f'Vol: {vol_ratio:.2f}x MA {"✅" if is_strong else "❌"}'
+
 
 # ═══════════════════════════════════════════════════════
 # ✅ ENHANCEMENT B2: Momentum Reversal with Caching
@@ -1102,12 +1125,14 @@ def check_signal(pair_name, config, session_mult, risk_mult):
             
             if lc < u_last and pc > u_prev:
                 filters = [
-        cef < ces,  # EMA20 < EMA50
-        RSI_SELL_MIN < cr < RSI_SELL_MAX
-    ]
-    if all(filters):
-        signal, entry = 'SELL', bid
-                    
+                    csd == -1,
+                    cef < ces,
+                    cet < cem < cesl,
+                    RSI_SELL_MIN < cr < RSI_SELL_MAX
+                ]
+                if all(filters):
+                    signal, entry = 'SELL', bid
+                    log(f'  {pair_name}: 🔴 SELL @ قمة | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
 
     # ═══════════════════════════════════════════════════════
     # BUY: Lower TL Break
@@ -1120,13 +1145,16 @@ def check_signal(pair_name, config, session_mult, risk_mult):
             pc = float(df_c['close'].iloc[li - 1])
             
             if lc > l_last and pc < l_prev:
-               filters = [
-        cef > ces,  # EMA20 > EMA50
-        RSI_BUY_MIN < cr < RSI_BUY_MAX
-    ]
-    if all(filters):
-        signal, entry = 'BUY', ask
-                   
+                filters = [
+                    csd == 1,
+                    cef > ces,
+                    cet > cem > cesl,
+                    RSI_BUY_MIN < cr < RSI_BUY_MAX
+                ]
+                if all(filters):
+                    signal, entry = 'BUY', ask
+                    log(f'  {pair_name}: 🟢 BUY @ قاع | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
+
     if not signal: return None
 
     # ═══════════════════════════════════════════════════════
