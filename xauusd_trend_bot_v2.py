@@ -802,29 +802,6 @@ def check_htf_confirmation(epic, direction):
 
 # ═══════════════════════════════════════════════════════
 # ✅ ENHANCEMENT A2: Volume Confirmation
-# ═══════════════════════════════════════════════════════
-def check_volume_confirmation(df):
-    """
-    ✅ ENHANCEMENT A2: تأكيد حجم الكسر
-    تحقق أن حجم الكسر أعلى من المتوسط
-    """
-    if not VOLUME_CONFIRMATION or df.empty or len(df) < VOLUME_MA_PERIOD:
-        return True, 'Volume check disabled'
-    
-    vol = df['volume']
-    if vol.sum() == 0:  # بدون بيانات حجم
-        return True, 'No volume data'
-    
-    vol_ma = vol.tail(VOLUME_MA_PERIOD).mean()
-    current_vol = vol.iloc[-1]
-    
-    if vol_ma == 0:
-        return True, 'No volume MA'
-    
-    vol_ratio = current_vol / vol_ma
-    is_strong = vol_ratio >= VOLUME_MULT_MIN
-    
-    return is_strong, f'Vol: {vol_ratio:.2f}x MA {"✅" if is_strong else "❌"}'
 
 
 # ═══════════════════════════════════════════════════════
