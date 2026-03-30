@@ -38,11 +38,11 @@ PAIRS = {
     'US500': {'epic': 'US500', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
 }
 
-STRATEGY_TF   = os.getenv('STRATEGY_TF', 'MINUTE_15')
+STRATEGY_TF   = os.getenv('STRATEGY_TF', 'MINUTE_1')
 CANDLES_COUNT = 500
 SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
-LENGTH, SLOPE_MULT, SLOPE_METHOD = int(os.getenv('LENGTH', '10')), float(os.getenv('SLOPE_MULT', '1.0')), os.getenv('SLOPE_METHOD', 'ATR')
+LENGTH, SLOPE_MULT, SLOPE_METHOD = int(os.getenv('LENGTH', '10')), float(os.getenv('SLOPE_MULT', '3.0')), os.getenv('SLOPE_METHOD', 'ATR')
 ATR_PERIOD, SL_ATR_MULT, TP_ATR_MULT = 14, 1.5, 3.0
 
 # ═══════════════════════════════════════════════════════
