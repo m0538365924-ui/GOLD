@@ -790,42 +790,19 @@ def check_htf_confirmation(epic, direction):
     last_f, last_s, last_t = ema_f.iloc[-1], ema_s.iloc[-1], ema_t.iloc[-1]
     
     # ✅ تحقق التوافق
-    if direction == 'BUY':
+    #if direction == 'BUY':
         # يجب أن يكون الاتجاه صعودي في H1
-        is_match = (last_f > last_s > last_t)
-        return is_match, f'HTF trend: {"UP ✅" if is_match else "DOWN ❌"}'
-    else:  # SELL
+       # is_match = (last_f > last_s > last_t)
+       # return is_match, f'HTF trend: {"UP ✅" if is_match else "DOWN ❌"}'
+   # else:  # SELL
         # يجب أن يكون الاتجاه هبوطي في H1
-        is_match = (last_f < last_s < last_t)
-        return is_match, f'HTF trend: {"DOWN ✅" if is_match else "UP ❌"}'
+      #  is_match = (last_f < last_s < last_t)
+       # return is_match, f'HTF trend: {"DOWN ✅" if is_match else "UP ❌"}'
 
 
 # ═══════════════════════════════════════════════════════
 # ✅ ENHANCEMENT A2: Volume Confirmation
 # ═══════════════════════════════════════════════════════
-def check_volume_confirmation(df):
-    """
-    ✅ ENHANCEMENT A2: تأكيد حجم الكسر
-    تحقق أن حجم الكسر أعلى من المتوسط
-    """
-    if not VOLUME_CONFIRMATION or df.empty or len(df) < VOLUME_MA_PERIOD:
-        return True, 'Volume check disabled'
-    
-    vol = df['volume']
-    if vol.sum() == 0:  # بدون بيانات حجم
-        return True, 'No volume data'
-    
-    vol_ma = vol.tail(VOLUME_MA_PERIOD).mean()
-    current_vol = vol.iloc[-1]
-    
-    if vol_ma == 0:
-        return True, 'No volume MA'
-    
-    vol_ratio = current_vol / vol_ma
-    is_strong = vol_ratio >= VOLUME_MULT_MIN
-    
-    return is_strong, f'Vol: {vol_ratio:.2f}x MA {"✅" if is_strong else "❌"}'
-
 
 # ═══════════════════════════════════════════════════════
 # ✅ ENHANCEMENT B2: Momentum Reversal with Caching
