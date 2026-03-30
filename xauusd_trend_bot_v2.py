@@ -1102,13 +1102,11 @@ def check_signal(pair_name, config, session_mult, risk_mult):
             
             if lc < u_last and pc > u_prev:
                 filters = [
-                    csd == -1,
-                    cef < ces,
-                    cet < cem < cesl,
-                    RSI_SELL_MIN < cr < RSI_SELL_MAX
-                ]
-                if all(filters):
-                    signal, entry = 'SELL', bid
+        cef < ces,  # EMA20 < EMA50
+        RSI_SELL_MIN < cr < RSI_SELL_MAX
+    ]
+    if all(filters):
+        signal, entry = 'SELL', bid
                     log(f'  {pair_name}: 🔴 SELL @ قمة | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
 
     # ═══════════════════════════════════════════════════════
@@ -1122,14 +1120,12 @@ def check_signal(pair_name, config, session_mult, risk_mult):
             pc = float(df_c['close'].iloc[li - 1])
             
             if lc > l_last and pc < l_prev:
-                filters = [
-                   # csd == 1,
-                    cef > ces,
-                   cet > cesl  # فقط EMA20 فوق EMA200,
-                    RSI_BUY_MIN < cr < RSI_BUY_MAX
-                ]
-                if all(filters):
-                    signal, entry = 'BUY', ask
+               filters = [
+        cef > ces,  # EMA20 > EMA50
+        RSI_BUY_MIN < cr < RSI_BUY_MAX
+    ]
+    if all(filters):
+        signal, entry = 'BUY', ask
                     log(f'  {pair_name}: 🟢 BUY @ قاع | RSI={cr:.1f} | RiskMult={final_risk_mult:.2f}')
 
     if not signal: return None
